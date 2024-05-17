@@ -1,13 +1,13 @@
 # syntax=docker/dockerfile:1
 
-ARG GO_VERSION=1.20.8
-ARG ALPINE_VERSION=3.18
+ARG GO_VERSION=1.22.2
 ARG XX_VERSION=1.2.1
+ARG BASE_IMAGE
 
 FROM --platform=$BUILDPLATFORM tonistiigi/xx:${XX_VERSION} AS xx
-FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-alpine${ALPINE_VERSION} AS base
+FROM --platform=$BUILDPLATFORM golang:${GO_VERSION} AS base
 COPY --from=xx / /
-RUN apk add --no-cache bash coreutils file git
+RUN apt update && apt install -y --no-install-recommends coreutils file && rm -rf /var/lib/apt
 ENV GO111MODULE=auto
 ENV CGO_ENABLED=0
 WORKDIR /go/src/github.com/docker/distribution
@@ -50,11 +50,8 @@ RUN --mount=from=binary,target=/build \
 FROM scratch AS artifact
 COPY --from=releaser /out /
 
-FROM alpine:${ALPINE_VERSION}
-RUN apk add --no-cache ca-certificates
-COPY cmd/registry/config-dev.yml /etc/docker/registry/config.yml
+FROM $BASE_IMAGE
 COPY --from=binary /registry /bin/registry
-VOLUME ["/var/lib/registry"]
 EXPOSE 5000
 ENTRYPOINT ["registry"]
 CMD ["serve", "/etc/docker/registry/config.yml"]
