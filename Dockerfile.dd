@@ -2,11 +2,13 @@ ARG BASE_IMAGE
 ARG BUILDER_IMAGE
 
 
-FROM $BUILDER_IMAGE AS builder
+FROM --platform=$BUILDPLATFORM $BUILDER_IMAGE AS builder
 RUN apt update && apt install --no-install-recommends -y make
 COPY . /app
 WORKDIR /app
-RUN make bin/registry
+ARG TARGETOS
+ARG TARGETARCH
+RUN OS=$TARGETOS ARCH=$TARGETARCH make bin/registry
 
 FROM $BASE_IMAGE
 COPY --from=builder /app/bin/registry /usr/bin/registry
