@@ -532,3 +532,110 @@ func testProxyStoreServe(t *testing.T, te *testEnv, numClients int) {
 		t.Fatalf("unexpected remote stats: %#v", remoteStats)
 	}
 }
+
+func TestProxyStoreServeRangeMiss(t *testing.T) {
+	te := makeTestEnv(t, "foo/bar")
+
+	blob := []byte("abcdefghijklmnopqrstuvwxyz0123456789")
+	desc, err := te.store.remoteStore.Put(te.ctx, "application/octet-stream", blob)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	w := httptest.NewRecorder()
+	r, err := http.NewRequest(http.MethodGet, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Header.Set("Range", "bytes=10-19")
+
+	if err := te.store.ServeBlob(te.ctx, w, r, desc.Digest); err != nil {
+		t.Fatal(err)
+	}
+
+	resp := w.Result()
+	bodyBytes, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if resp.StatusCode != http.StatusPartialContent {
+		t.Fatalf("unexpected status: %d", resp.StatusCode)
+	}
+	if got, want := resp.Header.Get("Content-Range"), "bytes 10-19/36"; got != want {
+		t.Fatalf("unexpected Content-Range: %q, want %q", got, want)
+	}
+	if got, want := resp.Header.Get("Content-Length"), "10"; got != want {
+		t.Fatalf("unexpected Content-Length: %q, want %q", got, want)
+	}
+	if got, want := string(bodyBytes), string(blob[10:20]); got != want {
+		t.Fatalf("unexpected body: %q, want %q", got, want)
+	}
+
+	cached, err := te.store.localStore.Get(te.ctx, desc.Digest)
+	if err != nil {
+		t.Fatalf("expected blob to be cached after range miss: %v", err)
+	}
+	if got, want := string(cached), string(blob); got != want {
+		t.Fatalf("unexpected cached blob: %q, want %q", got, want)
+	}
+
+	w = httptest.NewRecorder()
+	r, err = http.NewRequest(http.MethodGet, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Header.Set("Range", "bytes=-4")
+
+	if err := te.store.ServeBlob(te.ctx, w, r, desc.Digest); err != nil {
+		t.Fatal(err)
+	}
+
+	resp = w.Result()
+	bodyBytes, err = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if resp.StatusCode != http.StatusPartialContent {
+		t.Fatalf("unexpected cached range status: %d", resp.StatusCode)
+	}
+	if got, want := resp.Header.Get("Content-Range"), "bytes 32-35/36"; got != want {
+		t.Fatalf("unexpected cached Content-Range: %q, want %q", got, want)
+	}
+	if got, want := string(bodyBytes), "6789"; got != want {
+		t.Fatalf("unexpected cached range body: %q, want %q", got, want)
+	}
+}
+
+func TestProxyStoreServeRangeMissUnsatisfiable(t *testing.T) {
+	te := makeTestEnv(t, "foo/bar")
+
+	blob := []byte("abcdef")
+	desc, err := te.store.remoteStore.Put(te.ctx, "application/octet-stream", blob)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	w := httptest.NewRecorder()
+	r, err := http.NewRequest(http.MethodGet, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Header.Set("Range", "bytes=99-100")
+
+	if err := te.store.ServeBlob(te.ctx, w, r, desc.Digest); err != nil {
+		t.Fatal(err)
+	}
+
+	resp := w.Result()
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusRequestedRangeNotSatisfiable {
+		t.Fatalf("unexpected status: %d", resp.StatusCode)
+	}
+	if got, want := resp.Header.Get("Content-Range"), "bytes */6"; got != want {
+		t.Fatalf("unexpected Content-Range: %q, want %q", got, want)
+	}
+}

@@ -83,6 +83,13 @@ func (pmc *proxyMetricsCollector) BlobPull(bytesPulled uint64) {
 	pulledBytes.WithValues("blob").Inc(float64(bytesPulled))
 }
 
+// BlobPullBytes tracks upstream blob bytes without recording another cache miss.
+func (pmc *proxyMetricsCollector) BlobPullBytes(bytesPulled uint64) {
+	atomic.AddUint64(&pmc.blobMetrics.BytesPulled, bytesPulled)
+
+	pulledBytes.WithValues("blob").Inc(float64(bytesPulled))
+}
+
 // BlobPush tracks metrics about blobs pushed to clients
 func (pmc *proxyMetricsCollector) BlobPush(bytesPushed uint64, isHit bool) {
 	atomic.AddUint64(&pmc.blobMetrics.Requests, 1)
