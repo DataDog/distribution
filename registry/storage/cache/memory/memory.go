@@ -39,12 +39,12 @@ type descriptorCacheKey struct {
 
 type descriptionCacheValue struct {
 	descriptor v1.Descriptor
-	expiresAt  time.Time
+	addedAt    time.Time
 }
 
 type inMemoryBlobDescriptorCacheProvider struct {
 	lru *arc.ARCCache[descriptorCacheKey, descriptionCacheValue]
-	ttl time.Duration
+	ttl *time.Duration
 }
 
 // NewInMemoryBlobDescriptorCacheProvider returns a new mapped-based cache for
@@ -60,7 +60,6 @@ func NewInMemoryBlobDescriptorCacheProvider(size int, opts ...Option) cache.Blob
 	}
 	c := &inMemoryBlobDescriptorCacheProvider{
 		lru: lruCache,
-		ttl: DefaultTTL,
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -73,7 +72,7 @@ type Option func(*inMemoryBlobDescriptorCacheProvider)
 func WithTTL(ttl time.Duration) Option {
 	// A TTL of 0 disables the cache (all entries expire immediately).
 	return func(imbdcp *inMemoryBlobDescriptorCacheProvider) {
-		imbdcp.ttl = ttl
+		imbdcp.ttl = &ttl
 	}
 }
 
@@ -104,7 +103,7 @@ func (imbdcp *inMemoryBlobDescriptorCacheProvider) Stat(ctx context.Context, dgs
 	}
 	descriptor, ok := imbdcp.lru.Get(key)
 	if ok {
-		if time.Now().After(descriptor.expiresAt) {
+		if imbdcp.ttl != nil && time.Now().After(descriptor.addedAt.Add(*imbdcp.ttl)) {
 			dcontext.GetLogger(ctx).Debugf("cache entry for %s has expired", dgst)
 			imbdcp.lru.Remove(key)
 			expiredCacheCount.Inc(1)
@@ -142,7 +141,7 @@ func (imbdcp *inMemoryBlobDescriptorCacheProvider) SetDescriptor(ctx context.Con
 		}
 		cacheValue := descriptionCacheValue{
 			descriptor: desc,
-			expiresAt:  time.Now().Add(imbdcp.ttl),
+			addedAt:    time.Now(),
 		}
 		key := descriptorCacheKey{
 			digest: dgst,
@@ -173,7 +172,7 @@ func (rsimbdcp *repositoryScopedInMemoryBlobDescriptorCache) Stat(ctx context.Co
 	}
 	descriptor, ok := rsimbdcp.parent.lru.Get(key)
 	if ok {
-		if time.Now().After(descriptor.expiresAt) {
+		if rsimbdcp.parent.ttl != nil && time.Now().After(descriptor.addedAt.Add(*rsimbdcp.parent.ttl)) {
 			rsimbdcp.parent.lru.Remove(key)
 			expiredCacheCount.Inc(1)
 			return v1.Descriptor{}, distribution.ErrBlobUnknown
@@ -207,7 +206,7 @@ func (rsimbdcp *repositoryScopedInMemoryBlobDescriptorCache) SetDescriptor(ctx c
 	}
 	cacheValue := descriptionCacheValue{
 		descriptor: desc,
-		expiresAt:  time.Now().Add(rsimbdcp.parent.ttl),
+		addedAt:    time.Now(),
 	}
 	rsimbdcp.parent.lru.Add(key, cacheValue)
 	return rsimbdcp.parent.SetDescriptor(ctx, dgst, desc)
