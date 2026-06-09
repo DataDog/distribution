@@ -22,10 +22,6 @@ const (
 
 	// UnlimitedSize indicates the cache size should not be limited.
 	UnlimitedSize = math.MaxInt
-
-	// DefaultTTL is used when no TTL is explicitly configured. It is set to a
-	// very large value to preserve the original behaviour of no expiry.
-	DefaultTTL = 365 * 24 * time.Hour
 )
 
 var (
