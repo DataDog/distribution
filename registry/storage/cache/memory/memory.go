@@ -3,8 +3,11 @@ package memory
 import (
 	"context"
 	"math"
+	"time"
 
 	"github.com/distribution/distribution/v3"
+	"github.com/distribution/distribution/v3/internal/dcontext"
+	prometheus "github.com/distribution/distribution/v3/metrics"
 	"github.com/distribution/distribution/v3/registry/storage/cache"
 	"github.com/distribution/reference"
 	"github.com/hashicorp/golang-lru/arc/v2"
@@ -19,6 +22,14 @@ const (
 
 	// UnlimitedSize indicates the cache size should not be limited.
 	UnlimitedSize = math.MaxInt
+
+	// DefaultTTL is used when no TTL is explicitly configured. It is set to a
+	// very large value to preserve the original behaviour of no expiry.
+	DefaultTTL = 365 * 24 * time.Hour
+)
+
+var (
+	expiredCacheCount = prometheus.StorageNamespace.NewCounter("expired_cache_count", "The number of cache entries that have expired")
 )
 
 type descriptorCacheKey struct {
@@ -26,23 +37,43 @@ type descriptorCacheKey struct {
 	repo   string
 }
 
+type descriptionCacheValue struct {
+	descriptor v1.Descriptor
+	expiresAt  time.Time
+}
+
 type inMemoryBlobDescriptorCacheProvider struct {
-	lru *arc.ARCCache[descriptorCacheKey, v1.Descriptor]
+	lru *arc.ARCCache[descriptorCacheKey, descriptionCacheValue]
+	ttl time.Duration
 }
 
 // NewInMemoryBlobDescriptorCacheProvider returns a new mapped-based cache for
 // storing blob descriptor data.
-func NewInMemoryBlobDescriptorCacheProvider(size int) cache.BlobDescriptorCacheProvider {
+func NewInMemoryBlobDescriptorCacheProvider(size int, opts ...Option) cache.BlobDescriptorCacheProvider {
 	if size <= 0 {
 		size = math.MaxInt
 	}
-	lruCache, err := arc.NewARC[descriptorCacheKey, v1.Descriptor](size)
+	lruCache, err := arc.NewARC[descriptorCacheKey, descriptionCacheValue](size)
 	if err != nil {
 		// NewARC can only fail if size is <= 0, so this unreachable
 		panic(err)
 	}
-	return &inMemoryBlobDescriptorCacheProvider{
+	c := &inMemoryBlobDescriptorCacheProvider{
 		lru: lruCache,
+		ttl: DefaultTTL,
+	}
+	for _, opt := range opts {
+		opt(c)
+	}
+	return c
+}
+
+type Option func(*inMemoryBlobDescriptorCacheProvider)
+
+func WithTTL(ttl time.Duration) Option {
+	// A TTL of 0 disables the cache (all entries expire immediately).
+	return func(imbdcp *inMemoryBlobDescriptorCacheProvider) {
+		imbdcp.ttl = ttl
 	}
 }
 
@@ -73,7 +104,13 @@ func (imbdcp *inMemoryBlobDescriptorCacheProvider) Stat(ctx context.Context, dgs
 	}
 	descriptor, ok := imbdcp.lru.Get(key)
 	if ok {
-		return descriptor, nil
+		if time.Now().After(descriptor.expiresAt) {
+			dcontext.GetLogger(ctx).Debugf("cache entry for %s has expired", dgst)
+			imbdcp.lru.Remove(key)
+			expiredCacheCount.Inc(1)
+			return v1.Descriptor{}, distribution.ErrBlobUnknown
+		}
+		return descriptor.descriptor, nil
 	}
 	return v1.Descriptor{}, distribution.ErrBlobUnknown
 }
@@ -103,11 +140,14 @@ func (imbdcp *inMemoryBlobDescriptorCacheProvider) SetDescriptor(ctx context.Con
 		if err := cache.ValidateDescriptor(desc); err != nil {
 			return err
 		}
-
+		cacheValue := descriptionCacheValue{
+			descriptor: desc,
+			expiresAt:  time.Now().Add(imbdcp.ttl),
+		}
 		key := descriptorCacheKey{
 			digest: dgst,
 		}
-		imbdcp.lru.Add(key, desc)
+		imbdcp.lru.Add(key, cacheValue)
 		return nil
 	}
 	// we already know it, do nothing
@@ -133,7 +173,12 @@ func (rsimbdcp *repositoryScopedInMemoryBlobDescriptorCache) Stat(ctx context.Co
 	}
 	descriptor, ok := rsimbdcp.parent.lru.Get(key)
 	if ok {
-		return descriptor, nil
+		if time.Now().After(descriptor.expiresAt) {
+			rsimbdcp.parent.lru.Remove(key)
+			expiredCacheCount.Inc(1)
+			return v1.Descriptor{}, distribution.ErrBlobUnknown
+		}
+		return descriptor.descriptor, nil
 	}
 	return v1.Descriptor{}, distribution.ErrBlobUnknown
 }
@@ -160,6 +205,10 @@ func (rsimbdcp *repositoryScopedInMemoryBlobDescriptorCache) SetDescriptor(ctx c
 		digest: dgst,
 		repo:   rsimbdcp.repo,
 	}
-	rsimbdcp.parent.lru.Add(key, desc)
+	cacheValue := descriptionCacheValue{
+		descriptor: desc,
+		expiresAt:  time.Now().Add(rsimbdcp.parent.ttl),
+	}
+	rsimbdcp.parent.lru.Add(key, cacheValue)
 	return rsimbdcp.parent.SetDescriptor(ctx, dgst, desc)
 }

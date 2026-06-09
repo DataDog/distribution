@@ -311,8 +311,15 @@ func NewApp(ctx context.Context, config *configuration.Configuration) *App {
 					panic(fmt.Sprintf("invalid blobdescriptorsize value %s: %s", configuredSize, err))
 				}
 			}
-
-			cacheProvider := memorycache.NewInMemoryBlobDescriptorCacheProvider(blobDescriptorSize)
+			opts := []memorycache.Option{}
+			if configuredTTL, ok := cc["blobdescriptorttl"]; ok {
+				ttl, err := time.ParseDuration(fmt.Sprint(configuredTTL))
+				if err != nil {
+					panic(fmt.Sprintf("invalid blobdescriptorttl value %s: %s", configuredTTL, err))
+				}
+				opts = append(opts, memorycache.WithTTL(ttl))
+			}
+			cacheProvider := memorycache.NewInMemoryBlobDescriptorCacheProvider(blobDescriptorSize, opts...)
 			localOptions := append(options, storage.BlobDescriptorCacheProvider(cacheProvider))
 			app.registry, err = storage.NewRegistry(app, app.driver, localOptions...)
 			if err != nil {
