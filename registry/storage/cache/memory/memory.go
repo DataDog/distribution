@@ -3,8 +3,10 @@ package memory
 import (
 	"context"
 	"math"
+	"time"
 
 	"github.com/distribution/distribution/v3"
+	"github.com/distribution/distribution/v3/internal/dcontext"
 	prometheus "github.com/distribution/distribution/v3/metrics"
 	"github.com/distribution/distribution/v3/registry/storage/cache"
 	"github.com/distribution/reference"
@@ -24,8 +26,9 @@ const (
 )
 
 var (
-	lruCacheSize = prometheus.StorageNamespace.NewGauge("memory_cache_size", "The size of the memory cache", metrics.Total)
-	lruMaxSize   = prometheus.StorageNamespace.NewGauge("memory_cache_max_size", "The max size of the memory cache", metrics.Total)
+	expiredCacheCount = prometheus.StorageNamespace.NewCounter("expired_cache_count", "The number of cache entries that have expired")
+	lruCacheSize      = prometheus.StorageNamespace.NewGauge("memory_cache_size", "The size of the memory cache", metrics.Total)
+	lruMaxSize        = prometheus.StorageNamespace.NewGauge("memory_cache_max_size", "The max size of the memory cache", metrics.Total)
 )
 
 type descriptorCacheKey struct {
@@ -33,25 +36,44 @@ type descriptorCacheKey struct {
 	repo   string
 }
 
+type descriptionCacheValue struct {
+	descriptor v1.Descriptor
+	addedAt    time.Time
+}
+
 type inMemoryBlobDescriptorCacheProvider struct {
-	lru     *arc.ARCCache[descriptorCacheKey, v1.Descriptor]
+	lru     *arc.ARCCache[descriptorCacheKey, descriptionCacheValue]
 	maxSize int
+	ttl     *time.Duration
 }
 
 // NewInMemoryBlobDescriptorCacheProvider returns a new mapped-based cache for
 // storing blob descriptor data.
-func NewInMemoryBlobDescriptorCacheProvider(size int) cache.BlobDescriptorCacheProvider {
+func NewInMemoryBlobDescriptorCacheProvider(size int, opts ...Option) cache.BlobDescriptorCacheProvider {
 	if size <= 0 {
 		size = math.MaxInt
 	}
-	lruCache, err := arc.NewARC[descriptorCacheKey, v1.Descriptor](size)
+	lruCache, err := arc.NewARC[descriptorCacheKey, descriptionCacheValue](size)
 	if err != nil {
 		// NewARC can only fail if size is <= 0, so this unreachable
 		panic(err)
 	}
-	return &inMemoryBlobDescriptorCacheProvider{
+	c := &inMemoryBlobDescriptorCacheProvider{
 		lru:     lruCache,
 		maxSize: size,
+	}
+	for _, opt := range opts {
+		opt(c)
+	}
+	return c
+}
+
+type Option func(*inMemoryBlobDescriptorCacheProvider)
+
+func WithTTL(ttl time.Duration) Option {
+	// A TTL of 0 disables the cache (all entries expire immediately).
+	return func(imbdcp *inMemoryBlobDescriptorCacheProvider) {
+		imbdcp.ttl = &ttl
 	}
 }
 
@@ -78,6 +100,7 @@ func (imbdcp *inMemoryBlobDescriptorCacheProvider) RepositoryScoped(repo string)
 }
 
 func (imbdcp *inMemoryBlobDescriptorCacheProvider) Stat(ctx context.Context, dgst digest.Digest) (v1.Descriptor, error) {
+	defer imbdcp.emitMetrics()
 	if err := dgst.Validate(); err != nil {
 		return v1.Descriptor{}, err
 	}
@@ -87,7 +110,13 @@ func (imbdcp *inMemoryBlobDescriptorCacheProvider) Stat(ctx context.Context, dgs
 	}
 	descriptor, ok := imbdcp.lru.Get(key)
 	if ok {
-		return descriptor, nil
+		if imbdcp.ttl != nil && time.Now().After(descriptor.addedAt.Add(*imbdcp.ttl)) {
+			dcontext.GetLogger(ctx).Debugf("cache entry for %s has expired", dgst)
+			imbdcp.lru.Remove(key)
+			expiredCacheCount.Inc(1)
+			return v1.Descriptor{}, distribution.ErrBlobUnknown
+		}
+		return descriptor.descriptor, nil
 	}
 	return v1.Descriptor{}, distribution.ErrBlobUnknown
 }
@@ -119,11 +148,14 @@ func (imbdcp *inMemoryBlobDescriptorCacheProvider) SetDescriptor(ctx context.Con
 		if err := cache.ValidateDescriptor(desc); err != nil {
 			return err
 		}
-
+		cacheValue := descriptionCacheValue{
+			descriptor: desc,
+			addedAt:    time.Now(),
+		}
 		key := descriptorCacheKey{
 			digest: dgst,
 		}
-		imbdcp.lru.Add(key, desc)
+		imbdcp.lru.Add(key, cacheValue)
 		return nil
 	}
 	// we already know it, do nothing
@@ -139,6 +171,7 @@ type repositoryScopedInMemoryBlobDescriptorCache struct {
 }
 
 func (rsimbdcp *repositoryScopedInMemoryBlobDescriptorCache) Stat(ctx context.Context, dgst digest.Digest) (v1.Descriptor, error) {
+	defer rsimbdcp.parent.emitMetrics()
 	if err := dgst.Validate(); err != nil {
 		return v1.Descriptor{}, err
 	}
@@ -149,7 +182,12 @@ func (rsimbdcp *repositoryScopedInMemoryBlobDescriptorCache) Stat(ctx context.Co
 	}
 	descriptor, ok := rsimbdcp.parent.lru.Get(key)
 	if ok {
-		return descriptor, nil
+		if rsimbdcp.parent.ttl != nil && time.Now().After(descriptor.addedAt.Add(*rsimbdcp.parent.ttl)) {
+			rsimbdcp.parent.lru.Remove(key)
+			expiredCacheCount.Inc(1)
+			return v1.Descriptor{}, distribution.ErrBlobUnknown
+		}
+		return descriptor.descriptor, nil
 	}
 	return v1.Descriptor{}, distribution.ErrBlobUnknown
 }
@@ -178,6 +216,10 @@ func (rsimbdcp *repositoryScopedInMemoryBlobDescriptorCache) SetDescriptor(ctx c
 		digest: dgst,
 		repo:   rsimbdcp.repo,
 	}
-	rsimbdcp.parent.lru.Add(key, desc)
+	cacheValue := descriptionCacheValue{
+		descriptor: desc,
+		addedAt:    time.Now(),
+	}
+	rsimbdcp.parent.lru.Add(key, cacheValue)
 	return rsimbdcp.parent.SetDescriptor(ctx, dgst, desc)
 }
