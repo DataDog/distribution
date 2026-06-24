@@ -718,6 +718,10 @@ type Proxy struct {
 	// that cache writes don't hang indefinitely if the storage backend is slow.
 	// If not set, defaults to 5 minutes.
 	CacheWriteTimeout *time.Duration `yaml:"cachewritetimeout,omitempty"`
+
+	// SkipVerify disables TLS certificate verification against the upstream
+	// registry.
+	SkipVerify bool `yaml:"skipverify,omitempty"`
 }
 
 // ExecConfig defines the configuration for executing a command as a credential helper.

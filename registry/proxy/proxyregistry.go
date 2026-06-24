@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -34,6 +35,19 @@ type proxyingRegistry struct {
 	remoteURL         url.URL
 	authChallenger    authChallenger
 	basicAuth         auth.CredentialStore
+	transport         http.RoundTripper
+}
+
+// newProxyTransport returns the transport used for all upstream connections.
+// It clones http.DefaultTransport so non-TLS defaults (timeouts, proxy env,
+// connection pooling) are preserved, then applies the skip-verify setting.
+func newProxyTransport(skipVerify bool) *http.Transport {
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	if tr.TLSClientConfig == nil {
+		tr.TLSClientConfig = &tls.Config{}
+	}
+	tr.TLSClientConfig.InsecureSkipVerify = skipVerify
+	return tr
 }
 
 // NewRegistryPullThroughCache creates a registry acting as a pull through cache
@@ -122,13 +136,15 @@ func NewRegistryPullThroughCache(ctx context.Context, registry distribution.Name
 		}
 	}
 
+	proxyTransport := newProxyTransport(config.SkipVerify)
+
 	cs, b, err := func() (auth.CredentialStore, auth.CredentialStore, error) {
 		switch {
 		case config.Exec != nil:
 			cs, err := configureExecAuth(*config.Exec)
 			return cs, cs, err
 		default:
-			return configureAuth(config.Username, config.Password, config.RemoteURL)
+			return configureAuth(config.Username, config.Password, config.RemoteURL, proxyTransport)
 		}
 	}()
 	if err != nil {
@@ -145,8 +161,10 @@ func NewRegistryPullThroughCache(ctx context.Context, registry distribution.Name
 			remoteURL: *remoteURL,
 			cm:        challenge.NewSimpleManager(),
 			cs:        cs,
+			transport: proxyTransport,
 		},
 		basicAuth: b,
+		transport: proxyTransport,
 	}, nil
 }
 
@@ -162,7 +180,7 @@ func (pr *proxyingRegistry) Repository(ctx context.Context, name reference.Named
 	c := pr.authChallenger
 
 	tkopts := auth.TokenHandlerOptions{
-		Transport:   http.DefaultTransport,
+		Transport:   pr.transport,
 		Credentials: c.credentialStore(),
 		Scopes: []auth.Scope{
 			auth.RepositoryScope{
@@ -173,7 +191,7 @@ func (pr *proxyingRegistry) Repository(ctx context.Context, name reference.Named
 		Logger: dcontext.GetLogger(ctx),
 	}
 
-	tr := transport.NewTransport(http.DefaultTransport,
+	tr := transport.NewTransport(pr.transport,
 		auth.NewAuthorizer(c.challengeManager(),
 			auth.NewTokenHandlerWithOptions(tkopts),
 			auth.NewBasicHandler(pr.basicAuth)))
@@ -255,8 +273,9 @@ type authChallenger interface {
 type remoteAuthChallenger struct {
 	remoteURL url.URL
 	sync.Mutex
-	cm challenge.Manager
-	cs auth.CredentialStore
+	cm        challenge.Manager
+	cs        auth.CredentialStore
+	transport http.RoundTripper
 }
 
 func (r *remoteAuthChallenger) credentialStore() auth.CredentialStore {
@@ -286,7 +305,7 @@ func (r *remoteAuthChallenger) tryEstablishChallenges(ctx context.Context) error
 	}
 
 	// establish challenge type with upstream
-	if err := ping(r.cm, remoteURL.String(), challengeHeader); err != nil {
+	if err := ping(&http.Client{Transport: r.transport}, r.cm, remoteURL.String(), challengeHeader); err != nil {
 		return err
 	}
 	dcontext.GetLogger(ctx).Infof("Challenge established with upstream: %s", remoteURL.Redacted())
