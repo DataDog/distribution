@@ -319,6 +319,7 @@ proxy:
     command: docker-credential-helper
     lifetime: 1h
   ttl: 168h
+  skipverify: false
 validation:
   manifests:
     urls:
@@ -1233,6 +1234,7 @@ proxy:
   username: [username]
   password: [password]
   ttl: 168h
+  skipverify: false
 ```
 
 The `proxy` structure allows a registry to be configured as a pull-through cache
@@ -1245,6 +1247,7 @@ is unsupported.
 |-----------|----------|-------------------------------------------------------|
 | `remoteurl`| yes     | The URL for the repository on Docker Hub.             |
 | `ttl`      | no      | Expire proxy cache configured in "storage" after this time. Cache 168h(7 days) by default, set to 0 to disable cache expiration, The suffix is one of `ns`, `us`, `ms`, `s`, `m`, or `h`. If you specify a value but omit the suffix, the value is interpreted as a number of nanoseconds. |
+| `skipverify`| no     | When set to `true`, disables TLS certificate verification for connections to the upstream registry. Defaults to `false`. This is insecure (susceptible to man-in-the-middle attacks) and should only be used against trusted upstreams on a trusted network, or for testing. |
 
 To enable pulling private repositories (e.g. `batman/robin`), specify one of the
 following authentication methods for the pull-through cache to authenticate with
