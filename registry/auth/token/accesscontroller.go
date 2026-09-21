@@ -19,6 +19,7 @@ import (
 	"github.com/distribution/distribution/v3/registry/auth"
 	"github.com/go-jose/go-jose/v4"
 	"github.com/sirupsen/logrus"
+	"golang.org/x/sync/singleflight"
 )
 
 // init handles registering the token auth backend.
@@ -167,12 +168,24 @@ type accessController struct {
 	jwksSource          string
 	jwksRefreshInterval time.Duration
 	cancel              context.CancelFunc
+
+	// fetch amplification protection
+	onDemandRefreshGroup       singleflight.Group
+	onDemandRefreshMinInterval time.Duration
+	lastOnDemandRefresh        time.Time
 }
 
 const (
 	defaultAutoRedirectPath    = "/auth/token"
 	defaultJWKSRefreshInterval = 1 * time.Hour
 	defaultJWKSRefreshTimeout  = 10 * time.Second
+)
+
+const (
+	// bounds how often a token with an unknown key ID can trigger an on-demand JWKS
+	defaultOnDemandJWKSRefreshMinInterval = 5 * time.Second
+	// key used to deduplicate concurrent on-demand JWKS fetches.
+	jwksOnDemandRefreshKey = "jwks-on-demand"
 )
 
 // tokenAccessOptions is a convenience type for handling
@@ -441,6 +454,9 @@ func newAccessController(options map[string]any) (auth.AccessController, error) 
 		signingAlgorithms:   signAlgos,
 		jwksSource:          config.jwks,
 		jwksRefreshInterval: refreshInterval,
+
+		// fetch amplification protection
+		onDemandRefreshMinInterval: defaultOnDemandJWKSRefreshMinInterval,
 	}
 
 	if ac.jwksSource != "" && ac.jwksRefreshInterval > 0 {
@@ -495,6 +511,20 @@ func (ac *accessController) startRefresh(ctx context.Context) {
 	}()
 }
 
+// refreshKeysOnDemand refreshes the trusted keys from the JWKS source in
+// response to a token signed with an unknown key ID. It protects against fetch amplification
+func (ac *accessController) refreshKeysOnDemand() error {
+	_, err, _ := ac.onDemandRefreshGroup.Do(jwksOnDemandRefreshKey, func() (any, error) {
+		now := time.Now()
+		if now.Sub(ac.lastOnDemandRefresh) < ac.onDemandRefreshMinInterval {
+			return nil, nil
+		}
+		ac.lastOnDemandRefresh = now
+		return nil, ac.refreshKeys()
+	})
+	return err
+}
+
 // Close stops the background JWKS refresh goroutine if one was started.
 func (ac *accessController) Close() error {
 	if ac.cancel != nil {
@@ -542,7 +572,7 @@ func (ac *accessController) Authorized(req *http.Request, accessItems ...auth.Ac
 		// If the key ID is not in our current set and a JWKS source (file or
 		// URL) is configured, re-fetch it before rejecting the token.
 		if errors.Is(err, ErrUnknownKeyID) && ac.jwksSource != "" {
-			if refreshErr := ac.refreshKeys(); refreshErr != nil {
+			if refreshErr := ac.refreshKeysOnDemand(); refreshErr != nil {
 				logrus.Errorf("token auth: on-demand JWKS refresh from %q failed: %v", ac.jwksSource, refreshErr)
 			} else {
 				ac.mu.RLock()

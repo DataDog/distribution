@@ -4,12 +4,17 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
+	"encoding/json"
+	"fmt"
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/distribution/distribution/v3/registry/auth"
 	"github.com/go-jose/go-jose/v4"
 	"github.com/sirupsen/logrus"
 )
@@ -360,5 +365,139 @@ func TestJWKSRefreshKeepsOldKeysOnError(t *testing.T) {
 
 	if !hasOriginal {
 		t.Fatalf("expected original key to be preserved after failed refresh, got: %v", ac2.trustedKeys)
+	}
+}
+
+// TestAuthorizedOnDemandJWKSRefreshGuard covers the amplification guard on the
+// on-demand JWKS refresh: concurrent unknown-kid requests must trigger exactly
+// one fetch, a burst arriving within the minimum interval must trigger none,
+// and a request outside the interval must trigger a new one.
+func TestAuthorizedOnDemandJWKSRefreshGuard(t *testing.T) {
+	const (
+		issuer  = "test-issuer.example.com"
+		service = "test-service.example.com"
+	)
+
+	originalLevel := logrus.GetLevel()
+	t.Cleanup(func() { logrus.SetLevel(originalLevel) })
+	logrus.SetLevel(logrus.FatalLevel)
+
+	keys, err := makeRootKeys(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyAID := keys[0].X.String()
+	keyBID := keys[1].X.String()
+
+	// The server always serves key A only, so key B remains unknown: every
+	// request below is a rejected unknown-kid request, exactly like an
+	// attacker sending garbage-kid tokens.
+	var fetches atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fetches.Add(1)
+		// Keep fetches slow enough that concurrent requests overlap and
+		// exercise the singleflight deduplication path.
+		time.Sleep(25 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(jose.JSONWebKeySet{Keys: []jose.JSONWebKey{
+			{Key: &keys[0].PublicKey, KeyID: keyAID, Algorithm: string(jose.ES256)},
+		}})
+	}))
+	t.Cleanup(srv.Close)
+
+	options := map[string]any{
+		"realm":               "https://auth.example.com/token/",
+		"issuer":              issuer,
+		"service":             service,
+		"jwks":                srv.URL,
+		"jwksrefreshinterval": "0s", // disable periodic refresh; only on-demand
+	}
+
+	ac, err := newAccessController(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ac2 := ac.(*accessController)
+	t.Cleanup(func() { _ = ac2.Close() })
+	// Shrink the on-demand minimum interval so the test does not have to
+	// wait for the production default (5s).
+	ac2.onDemandRefreshMinInterval = 200 * time.Millisecond
+
+	// Token signed with key B, whose kid is never served: every request
+	// below must be rejected.
+	tokenB, err := makeTestTokenKIDOnly(
+		keys[1], keyBID, issuer, service,
+		[]*ResourceActions{{Type: "repository", Name: "foo/bar", Actions: []string{"pull"}}},
+		time.Now(), time.Now().Add(5*time.Minute),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	access := auth.Access{
+		Resource: auth.Resource{Type: "repository", Name: "foo/bar"},
+		Action:   "pull",
+	}
+	authorized := func() error {
+		req, err := http.NewRequest(http.MethodGet, "http://example.com/v2/foo/bar/manifests/latest", nil)
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", tokenB.Raw))
+		_, err = ac.Authorized(req, access)
+		return err
+	}
+
+	// Initial JWKS load at controller construction.
+	if got := fetches.Load(); got != 1 {
+		t.Fatalf("expected 1 fetch after init, got %d", got)
+	}
+
+	// Burst 1: concurrent unknown-kid requests trigger exactly one fetch.
+	concurrentRequests(t, 8, authorized)
+	if got := fetches.Load(); got != 2 {
+		t.Fatalf("expected exactly one on-demand fetch for a concurrent burst, got %d fetches total", got)
+	}
+
+	// Burst 2, immediately after: no fetch within the minimum interval;
+	// requests are rejected against the current keys.
+	concurrentRequests(t, 8, authorized)
+	if got := fetches.Load(); got != 2 {
+		t.Fatalf("expected no fetch within the minimum interval, got %d fetches total", got)
+	}
+
+	// Outside the minimum interval, the next unknown-kid request fetches again.
+	time.Sleep(250 * time.Millisecond)
+	if err := authorized(); err == nil {
+		t.Fatal("expected request to be rejected, key B is never served")
+	}
+	if got := fetches.Load(); got != 3 {
+		t.Fatalf("expected a new fetch outside the minimum interval, got %d fetches total", got)
+	}
+}
+
+// concurrentRequests runs fn from n goroutines released at the same time and
+// asserts every call returns a non-nil error (a challenge).
+func concurrentRequests(t *testing.T, n int, fn func() error) {
+	t.Helper()
+
+	start := make(chan struct{})
+	errs := make([]error, n)
+	var wg sync.WaitGroup
+	for i := range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			errs[i] = fn()
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	for i, err := range errs {
+		if err == nil {
+			t.Fatalf("request %d: expected rejection, got authorized", i)
+		}
 	}
 }
