@@ -668,7 +668,7 @@ security.
 | `autoredirectpath`   | no       | The path to redirect to if `autoredirect` is set to `true`, default: `/auth/token/`. |
 | `signingalgorithms`  | no       | A list of token signing algorithms to use for verifying token signatures. If left empty the default list of signing algorithms is used. Please see below for allowed values and default. |
 | `jwks`               | no       | The path or URL of the JSON Web Key Set (JWKS). Accepts either an absolute file path or an `http`/`https` URL. The JWKS contains the trusted public keys used to verify the signature of authentication tokens. |
-| `jwksrefreshinterval` | no      | How often to re-fetch the JWKS source and refresh the trusted keys. Accepts any Go duration string (e.g. `10m`, `1h`). Defaults to `1h` when `jwks` is set. Set to `0` to disable periodic refresh. |
+| `jwksrefreshinterval` | no      | How often to re-fetch the JWKS source and refresh the trusted keys. Accepts any Go duration string (e.g. `10m`, `1h`). Defaults to `1h` when `jwks` is set. Set to `0` to disable periodic refresh. On-demand refreshes triggered by unknown key IDs are rate-limited independently of this value (see notes below). |
 
 Available `signingalgorithms`:
 - EdDSA
@@ -710,6 +710,7 @@ Additional notes on `jwks` and `jwksrefreshinterval`:
 - `jwks` accepts either a local file path (e.g. `/etc/registry/jwks.json`) or a remote URL (e.g. `https://auth.example.com/.well-known/jwks.json`).
 - When `jwksrefreshinterval` is set (or defaulted to `1h`), a background goroutine periodically re-fetches the JWKS and replaces the trusted keys. Set `jwksrefreshinterval` to `0` to disable periodic refresh.
 - When a token arrives signed with an unknown key ID, the registry performs an immediate on-demand re-fetch of the JWKS before rejecting the request. This covers the window between a key rotation on the auth server and the next periodic refresh tick. On-demand refresh is active regardless of the `jwksrefreshinterval` value, as long as `jwks` is configured.
+- On-demand refreshes are guarded against fetch amplification: concurrent requests carrying an unknown key ID share a single fetch, and at most one on-demand fetch is performed every 5 seconds regardless of request volume. Requests arriving within that window are verified against the currently trusted keys and rejected if the key ID remains unknown. The guard applies to the request path only; periodic refreshes are unaffected.
 - If any refresh attempt fails (network error, non-200 response, or invalid JSON), the previously loaded keys are kept and the error is logged. The registry continues to serve requests using the existing keys.
 - `rootcertbundle` and `jwks` can be used together; the registry will trust keys from both sources.
 

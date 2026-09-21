@@ -19,6 +19,7 @@ import (
 	"github.com/distribution/distribution/v3/registry/auth"
 	"github.com/go-jose/go-jose/v4"
 	"github.com/sirupsen/logrus"
+	"golang.org/x/sync/singleflight"
 )
 
 // init handles registering the token auth backend.
@@ -167,13 +168,35 @@ type accessController struct {
 	jwksSource          string
 	jwksRefreshInterval time.Duration
 	cancel              context.CancelFunc
+	// onDemandRefreshGroup deduplicates concurrent on-demand JWKS fetches
+	// triggered by tokens carrying an unknown key ID (see refreshKeysOnDemand).
+	onDemandRefreshGroup singleflight.Group
+	// onDemandRefreshMinInterval is the minimum interval between two on-demand
+	// JWKS fetches; requests arriving sooner skip the fetch and are verified
+	// against the currently trusted keys.
+	onDemandRefreshMinInterval time.Duration
+	// lastOnDemandRefresh is the time the last on-demand fetch was started.
+	// It is only read and written inside onDemandRefreshGroup.Do callbacks:
+	// singleflight guarantees the callback never runs concurrently for the
+	// same key, so no extra locking is needed.
+	lastOnDemandRefresh time.Time
 }
 
 const (
 	defaultAutoRedirectPath    = "/auth/token"
 	defaultJWKSRefreshInterval = 1 * time.Hour
 	defaultJWKSRefreshTimeout  = 10 * time.Second
+	// defaultOnDemandJWKSRefreshMinInterval bounds how often a token with an
+	// unknown key ID can trigger an on-demand JWKS fetch in the request path.
+	// Without it, unauthenticated garbage-kid tokens would make the registry
+	// emit one outbound fetch per request (fetch amplification); see
+	// refreshKeysOnDemand.
+	defaultOnDemandJWKSRefreshMinInterval = 5 * time.Second
 )
+
+// jwksOnDemandRefreshKey is the singleflight key used to deduplicate
+// concurrent on-demand JWKS fetches.
+const jwksOnDemandRefreshKey = "jwks-on-demand"
 
 // tokenAccessOptions is a convenience type for handling
 // options to the constructor of an accessController.
@@ -431,16 +454,17 @@ func newAccessController(options map[string]any) (auth.AccessController, error) 
 	}
 
 	ac := &accessController{
-		realm:               config.realm,
-		autoRedirect:        config.autoRedirect,
-		autoRedirectPath:    config.autoRedirectPath,
-		issuer:              config.issuer,
-		service:             config.service,
-		rootCerts:           rootPool,
-		trustedKeys:         trustedKeys,
-		signingAlgorithms:   signAlgos,
-		jwksSource:          config.jwks,
-		jwksRefreshInterval: refreshInterval,
+		realm:                      config.realm,
+		autoRedirect:               config.autoRedirect,
+		autoRedirectPath:           config.autoRedirectPath,
+		issuer:                     config.issuer,
+		service:                    config.service,
+		rootCerts:                  rootPool,
+		trustedKeys:                trustedKeys,
+		signingAlgorithms:          signAlgos,
+		jwksSource:                 config.jwks,
+		jwksRefreshInterval:        refreshInterval,
+		onDemandRefreshMinInterval: defaultOnDemandJWKSRefreshMinInterval,
 	}
 
 	if ac.jwksSource != "" && ac.jwksRefreshInterval > 0 {
@@ -495,6 +519,36 @@ func (ac *accessController) startRefresh(ctx context.Context) {
 	}()
 }
 
+// refreshKeysOnDemand refreshes the trusted keys from the JWKS source in
+// response to a token signed with an unknown key ID, i.e. from the request
+// path. Unlike the periodic refresh, it guards against fetch amplification:
+// every unauthenticated request carrying a garbage key ID would otherwise
+// make the registry emit one outbound fetch (an HTTPS request to the JWKS
+// endpoint or a read of the JWKS file), turning the registry and its workers
+// into an amplification vector against the JWKS source.
+//
+// Two protections, both scoped to the request path only (the periodic
+// refresh ticker is unaffected):
+//
+//   - Deduplication: concurrent unknown-key-ID requests share a single
+//     in-flight fetch via singleflight.
+//   - Rate limiting: at most one fetch per onDemandRefreshMinInterval;
+//     requests arriving within that window skip the fetch, re-verify against
+//     the currently trusted keys, and are rejected if the key is still
+//     unknown. A failed fetch also consumes the interval, so a failing or
+//     slow JWKS source cannot be hammered either.
+func (ac *accessController) refreshKeysOnDemand() error {
+	_, err, _ := ac.onDemandRefreshGroup.Do(jwksOnDemandRefreshKey, func() (any, error) {
+		now := time.Now()
+		if now.Sub(ac.lastOnDemandRefresh) < ac.onDemandRefreshMinInterval {
+			return nil, nil
+		}
+		ac.lastOnDemandRefresh = now
+		return nil, ac.refreshKeys()
+	})
+	return err
+}
+
 // Close stops the background JWKS refresh goroutine if one was started.
 func (ac *accessController) Close() error {
 	if ac.cancel != nil {
@@ -542,7 +596,7 @@ func (ac *accessController) Authorized(req *http.Request, accessItems ...auth.Ac
 		// If the key ID is not in our current set and a JWKS source (file or
 		// URL) is configured, re-fetch it before rejecting the token.
 		if errors.Is(err, ErrUnknownKeyID) && ac.jwksSource != "" {
-			if refreshErr := ac.refreshKeys(); refreshErr != nil {
+			if refreshErr := ac.refreshKeysOnDemand(); refreshErr != nil {
 				logrus.Errorf("token auth: on-demand JWKS refresh from %q failed: %v", ac.jwksSource, refreshErr)
 			} else {
 				ac.mu.RLock()
