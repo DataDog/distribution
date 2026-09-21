@@ -712,6 +712,7 @@ Additional notes on `jwks` and `jwksrefreshinterval`:
 - `jwks` accepts either a local file path (e.g. `/etc/registry/jwks.json`) or a remote URL (e.g. `https://auth.example.com/.well-known/jwks.json`).
 - When `jwksrefreshinterval` is set (or defaulted to `1h`), a background goroutine periodically re-fetches the JWKS and replaces the trusted keys. Set `jwksrefreshinterval` to `0` to disable periodic refresh.
 - When a token arrives signed with an unknown key ID, the registry performs an immediate on-demand re-fetch of the JWKS before rejecting the request. This covers the window between a key rotation on the auth server and the next periodic refresh tick. On-demand refresh is active regardless of the `jwksrefreshinterval` value, as long as `jwks` is configured.
+- On-demand refreshes are guarded against fetch amplification: concurrent requests carrying an unknown key ID share a single fetch, and at most one on-demand fetch is performed every 5 seconds regardless of request volume. Requests arriving within that window are verified against the currently trusted keys and rejected if the key ID remains unknown.
 - If any refresh attempt fails (network error, non-200 response, or invalid JSON), the previously loaded keys are kept and the error is logged. The registry continues to serve requests using the existing keys.
 - `rootcertbundle` and `jwks` can be used together; the registry will trust keys from both sources.
 
