@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"expvar"
 	"fmt"
+	"io"
 	"math"
 	"math/big"
 	"net"
@@ -468,6 +469,11 @@ func (app *App) RegisterHealthChecks(healthRegistries ...*health.Registry) {
 func (app *App) Shutdown() error {
 	if app.cancel != nil {
 		defer app.cancel()
+	}
+	if c, ok := app.accessController.(io.Closer); ok {
+		if err := c.Close(); err != nil {
+			return err
+		}
 	}
 	if r, ok := app.registry.(proxy.Closer); ok {
 		return r.Close()
