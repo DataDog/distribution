@@ -31,6 +31,7 @@ type proxyingRegistry struct {
 	scheduler         *scheduler.TTLExpirationScheduler
 	ttl               *time.Duration
 	cacheWriteTimeout time.Duration
+	forwardRedirects  bool
 	remoteURL         url.URL
 	authChallenger    authChallenger
 	basicAuth         auth.CredentialStore
@@ -140,6 +141,7 @@ func NewRegistryPullThroughCache(ctx context.Context, registry distribution.Name
 		scheduler:         s,
 		ttl:               ttl,
 		cacheWriteTimeout: cacheWriteTimeout,
+		forwardRedirects:  config.ForwardRedirects,
 		remoteURL:         *remoteURL,
 		authChallenger: &remoteAuthChallenger{
 			remoteURL: *remoteURL,
@@ -206,6 +208,7 @@ func (pr *proxyingRegistry) Repository(ctx context.Context, name reference.Named
 			cacheWriteTimeout: pr.cacheWriteTimeout,
 			repositoryName:    name,
 			authChallenger:    pr.authChallenger,
+			redirects:         pr.redirectOpener(remoteRepo.Blobs(ctx)),
 		},
 		manifests: &proxyManifestStore{
 			repositoryName:  name,

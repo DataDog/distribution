@@ -723,6 +723,11 @@ type Proxy struct {
 	// that cache writes don't hang indefinitely if the storage backend is slow.
 	// If not set, defaults to 5 minutes.
 	CacheWriteTimeout *time.Duration `yaml:"cachewritetimeout,omitempty"`
+
+	// ForwardRedirects, on a blob GET cache miss, sends to the client a 307
+	// that the remote registry returns to another host (such as a presigned
+	// storage URL), and fills the cache in the background.
+	ForwardRedirects bool `yaml:"forwardredirects,omitempty"`
 }
 
 // ExecConfig defines the configuration for executing a command as a credential helper.

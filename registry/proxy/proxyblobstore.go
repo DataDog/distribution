@@ -26,6 +26,7 @@ type proxyBlobStore struct {
 	cacheWriteTimeout time.Duration
 	repositoryName    reference.Named
 	authChallenger    authChallenger
+	redirects         redirectOpener // set when the proxy forwards upstream redirects
 }
 
 var _ distribution.BlobStore = &proxyBlobStore{}
@@ -119,6 +120,10 @@ func (pbs *proxyBlobStore) ServeBlob(ctx context.Context, w http.ResponseWriter,
 
 	if err := pbs.authChallenger.tryEstablishChallenges(ctx); err != nil {
 		return err
+	}
+
+	if pbs.forwardsRedirects(r) {
+		return pbs.serveRedirectable(ctx, w, r, dgst)
 	}
 
 	mu.Lock()
