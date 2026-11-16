@@ -6,6 +6,7 @@ import (
 	"math/rand"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -294,6 +295,47 @@ func TestProxyStoreStat(t *testing.T) {
 
 	if te.store.authChallenger.(*mockChallenger).count != len(te.inRemote) {
 		t.Fatalf("Unexpected auth challenge count, got %#v", te.store.authChallenger)
+	}
+}
+
+func TestProxyStoreServeHeadDoesNotCache(t *testing.T) {
+	te := makeTestEnv(t, "foo/bar")
+	populate(t, te, 1, 10, 1)
+
+	remoteBlob := te.inRemote[0]
+	w := httptest.NewRecorder()
+	r, err := http.NewRequest(http.MethodHead, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := te.store.ServeBlob(te.ctx, w, r, remoteBlob.Digest); err != nil {
+		t.Fatal(err)
+	}
+
+	resp := w.Result()
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected status code: %d", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Content-Length"); got != strconv.FormatInt(remoteBlob.Size, 10) {
+		t.Errorf("unexpected Content-Length: %q", got)
+	}
+	if got := resp.Header.Get("Docker-Content-Digest"); got != remoteBlob.Digest.String() {
+		t.Errorf("unexpected Docker-Content-Digest: %q", got)
+	}
+	if w.Body.Len() != 0 {
+		t.Errorf("HEAD response contained %d body bytes", w.Body.Len())
+	}
+
+	localStats := te.LocalStats()
+	remoteStats := te.RemoteStats()
+	if (*localStats)["create"] != 0 {
+		t.Errorf("HEAD created a local blob writer")
+	}
+	if (*remoteStats)["open"] != 0 {
+		t.Errorf("HEAD opened the remote blob")
 	}
 }
 
