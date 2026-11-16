@@ -121,6 +121,17 @@ func (pbs *proxyBlobStore) ServeBlob(ctx context.Context, w http.ResponseWriter,
 		return err
 	}
 
+	if r.Method == http.MethodHead {
+		desc, err := pbs.remoteStore.Stat(ctx, dgst)
+		if err != nil {
+			return err
+		}
+
+		setResponseHeaders(w.Header(), desc.Size, desc.MediaType, desc.Digest)
+		w.WriteHeader(http.StatusOK)
+		return nil
+	}
+
 	mu.Lock()
 	_, ok := inflight[dgst]
 	if ok {
