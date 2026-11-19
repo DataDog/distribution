@@ -77,10 +77,8 @@ func rangeRequested(r *http.Request) bool {
 // serveRemote streams the blob from the remote store to the client, honoring
 // any Range header via http.ServeContent. It does not populate the local cache.
 func (pbs *proxyBlobStore) serveRemote(ctx context.Context, w http.ResponseWriter, r *http.Request, dgst digest.Digest, desc v1.Descriptor) error {
-	remoteReader, err := pbs.remoteStore.Open(ctx, dgst)
-	if err != nil {
-		return err
-	}
+	_, end, _ := singleRange(r, desc.Size)
+	remoteReader := newRemoteReader(ctx, pbs.remoteStore, dgst, desc.Size, end)
 	defer remoteReader.Close()
 
 	setResponseHeaders(w.Header(), desc.Size, desc.MediaType, dgst)
