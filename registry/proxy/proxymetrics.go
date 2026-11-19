@@ -74,12 +74,11 @@ func initPrometheusMetrics(value string) {
 	pushedBytes.WithValues(value).Inc(0)
 }
 
-// BlobPull tracks metrics about blobs pulled into the cache
+// BlobPull tracks bytes pulled from the upstream. Requests share fetches, so
+// it does not count misses.
 func (pmc *proxyMetricsCollector) BlobPull(bytesPulled uint64) {
-	atomic.AddUint64(&pmc.blobMetrics.Misses, 1)
 	atomic.AddUint64(&pmc.blobMetrics.BytesPulled, bytesPulled)
 
-	misses.WithValues("blob").Inc(1)
 	pulledBytes.WithValues("blob").Inc(float64(bytesPulled))
 }
 
@@ -95,6 +94,10 @@ func (pmc *proxyMetricsCollector) BlobPush(bytesPushed uint64, isHit bool) {
 		atomic.AddUint64(&pmc.blobMetrics.Hits, 1)
 
 		hits.WithValues("blob").Inc(1)
+	} else {
+		atomic.AddUint64(&pmc.blobMetrics.Misses, 1)
+
+		misses.WithValues("blob").Inc(1)
 	}
 }
 

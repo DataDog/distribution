@@ -5,8 +5,6 @@ import (
 	"io"
 	"net/http"
 	"strconv"
-	"strings"
-	"sync"
 	"time"
 
 	"github.com/opencontainers/go-digest"
@@ -26,15 +24,10 @@ type proxyBlobStore struct {
 	cacheWriteTimeout time.Duration
 	repositoryName    reference.Named
 	authChallenger    authChallenger
+	fills             *fillRegistry
 }
 
 var _ distribution.BlobStore = &proxyBlobStore{}
-
-// inflight tracks currently downloading blobs
-var inflight = make(map[digest.Digest]struct{})
-
-// mu protects inflight
-var mu sync.Mutex
 
 func setResponseHeaders(h http.Header, length int64, mediaType string, digest digest.Digest) {
 	h.Set("Content-Length", strconv.FormatInt(length, 10))
@@ -43,53 +36,24 @@ func setResponseHeaders(h http.Header, length int64, mediaType string, digest di
 	h.Set("Etag", digest.String())
 }
 
-func (pbs *proxyBlobStore) copyContent(ctx context.Context, dgst digest.Digest, writer io.Writer, h http.Header) (v1.Descriptor, error) {
-	desc, err := pbs.remoteStore.Stat(ctx, dgst)
-	if err != nil {
-		return v1.Descriptor{}, err
-	}
-
-	setResponseHeaders(h, desc.Size, desc.MediaType, dgst)
-
-	remoteReader, err := pbs.remoteStore.Open(ctx, dgst)
-	if err != nil {
-		return v1.Descriptor{}, err
-	}
-
-	defer remoteReader.Close()
-
-	_, err = io.CopyN(writer, remoteReader, desc.Size)
-	if err != nil {
-		return v1.Descriptor{}, err
-	}
-
-	proxyMetrics.BlobPull(uint64(desc.Size))
-	proxyMetrics.BlobPush(uint64(desc.Size), false)
-
-	return desc, nil
-}
-
-// rangeRequested reports whether r carries a Range header.
-func rangeRequested(r *http.Request) bool {
-	return strings.TrimSpace(r.Header.Get("Range")) != ""
-}
-
 // serveRemote streams the blob from the remote store to the client, honoring
 // any Range header via http.ServeContent. It does not populate the local cache.
-func (pbs *proxyBlobStore) serveRemote(ctx context.Context, w http.ResponseWriter, r *http.Request, dgst digest.Digest, desc v1.Descriptor) error {
+func (pbs *proxyBlobStore) serveRemote(ctx context.Context, w http.ResponseWriter, r *http.Request, desc v1.Descriptor) {
 	_, end, _ := singleRange(r, desc.Size)
-	remoteReader := newRemoteReader(ctx, pbs.remoteStore, dgst, desc.Size, end)
+	remoteReader := newRemoteReader(ctx, pbs.remoteStore, desc.Digest, desc.Size, end)
 	defer remoteReader.Close()
+	serveContent(w, r, desc, remoteReader)
+}
 
-	setResponseHeaders(w.Header(), desc.Size, desc.MediaType, dgst)
-	http.ServeContent(w, r, dgst.String(), time.Time{}, remoteReader)
+func serveContent(w http.ResponseWriter, r *http.Request, desc v1.Descriptor, content io.ReadSeeker) {
+	setResponseHeaders(w.Header(), desc.Size, desc.MediaType, desc.Digest)
+	http.ServeContent(w, r, desc.Digest.String(), time.Time{}, content)
 
 	// ServeContent rewrites Content-Length to the bytes actually served (the
 	// range size for a 206, or the full size for a 200), so read it back for
 	// the push metric. It is empty/zero for a multipart multi-range response.
 	pushed, _ := strconv.ParseInt(w.Header().Get("Content-Length"), 10, 64)
 	proxyMetrics.BlobPush(uint64(pushed), false)
-	return nil
 }
 
 func (pbs *proxyBlobStore) serveLocal(ctx context.Context, w http.ResponseWriter, r *http.Request, dgst digest.Digest) (bool, error) {
@@ -130,121 +94,52 @@ func (pbs *proxyBlobStore) ServeBlob(ctx context.Context, w http.ResponseWriter,
 		return nil
 	}
 
-	mu.Lock()
-	_, ok := inflight[dgst]
-	if ok {
-		// If the blob has been serving in other requests.
-		// Will return the blob from the remote store directly.
-		// TODO Maybe we could reuse the these blobs are serving remotely and caching locally.
-		mu.Unlock()
-		if rangeRequested(r) {
-			// Another request owns the cache write; just serve the
-			// requested range to this client from the remote store.
-			desc, err := pbs.remoteStore.Stat(ctx, dgst)
-			if err != nil {
-				return err
-			}
-			return pbs.serveRemote(ctx, w, r, dgst, desc)
-		}
-		_, err := pbs.copyContent(ctx, dgst, w, w.Header())
-		return err
-	}
-	inflight[dgst] = struct{}{}
-	mu.Unlock()
-
-	defer func() {
-		mu.Lock()
-		delete(inflight, dgst)
-		mu.Unlock()
-	}()
-
-	// Create a detached context for the blob writer that won't be canceled
-	// when the HTTP request context is canceled. This allows the cache write
-	// to complete even if the client disconnects.
-	// Use the configured timeout to prevent hanging operations.
-	writerCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), pbs.cacheWriteTimeout)
-	defer cancel()
-
-	bw, err := pbs.localStore.Create(writerCtx)
+	f, leader, err := pbs.joinFill(ctx, dgst)
 	if err != nil {
 		return err
 	}
+	defer pbs.fills.release(f)
 
-	committed := false
-	// Ensure the writer is canceled if we return early with an error
-	defer func() {
-		if !committed {
-			if err := bw.Cancel(writerCtx); err != nil {
-				dcontext.GetLogger(ctx).WithError(err).Errorf("Error canceling blob writer")
-			}
-		}
-	}()
+	pbs.serveFill(ctx, w, r, f)
+	if !leader {
+		return nil
+	}
+	// The request that started the fill returns the cache result.
+	select {
+	case <-f.done:
+		return f.err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
 
-	var desc v1.Descriptor
-	if rangeRequested(r) {
-		// A ranged client only wants part of the blob, but we still populate
-		// the cache with the full blob. Download the full blob into the cache
-		// in parallel while serving the requested range from a separate reader.
-		desc, err = pbs.remoteStore.Stat(ctx, dgst)
-		if err != nil {
-			return err
-		}
-
-		cacheErr := make(chan error, 1)
+func (pbs *proxyBlobStore) joinFill(ctx context.Context, dgst digest.Digest) (f *blobFill, leader bool, err error) {
+	key := fillKey{repository: pbs.repositoryName.Name(), dgst: dgst}
+	if f := pbs.fills.lookup(key); f != nil {
+		return f, false, nil
+	}
+	desc, err := pbs.remoteStore.Stat(ctx, dgst)
+	if err != nil {
+		return nil, false, err
+	}
+	f, leader = pbs.fills.start(key, desc)
+	if leader {
+		fillCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), pbs.cacheWriteTimeout)
 		go func() {
-			remoteReader, err := pbs.remoteStore.Open(writerCtx, dgst)
-			if err != nil {
-				cacheErr <- err
-				return
-			}
-			defer remoteReader.Close()
-
-			if _, err := io.CopyN(bw, remoteReader, desc.Size); err != nil {
-				cacheErr <- err
-				return
-			}
-			proxyMetrics.BlobPull(uint64(desc.Size))
-			cacheErr <- nil
+			defer cancel()
+			pbs.fills.run(fillCtx, pbs, key, f)
 		}()
-
-		serveErr := pbs.serveRemote(ctx, w, r, dgst, desc)
-		if cacheErr := <-cacheErr; cacheErr != nil {
-			return cacheErr
-		}
-		if serveErr != nil {
-			return serveErr
-		}
-	} else {
-		// Serving client and storing locally over same fetching request.
-		// This can prevent a redundant blob fetching.
-		multiWriter := io.MultiWriter(w, bw)
-		desc, err = pbs.copyContent(ctx, dgst, multiWriter, w.Header())
-		if err != nil {
-			return err
-		}
 	}
+	return f, leader, nil
+}
 
-	_, err = bw.Commit(writerCtx, desc)
-	if err != nil {
-		return err
+func (pbs *proxyBlobStore) serveFill(ctx context.Context, w http.ResponseWriter, r *http.Request, f *blobFill) {
+	start, _, _ := singleRange(r, f.desc.Size)
+	if !f.canServe(start) {
+		pbs.serveRemote(ctx, w, r, f.desc)
+		return
 	}
-
-	committed = true
-
-	blobRef, err := reference.WithDigest(pbs.repositoryName, dgst)
-	if err != nil {
-		dcontext.GetLogger(ctx).Errorf("Error creating reference: %s", err)
-		return err
-	}
-
-	if pbs.scheduler != nil && pbs.ttl != nil {
-		if err := pbs.scheduler.AddBlob(blobRef, *pbs.ttl); err != nil {
-			dcontext.GetLogger(ctx).Errorf("Error adding blob: %s", err)
-			return err
-		}
-	}
-
-	return nil
+	serveContent(w, r, f.desc, &spoolReader{ctx: ctx, f: f})
 }
 
 func (pbs *proxyBlobStore) Stat(ctx context.Context, dgst digest.Digest) (v1.Descriptor, error) {

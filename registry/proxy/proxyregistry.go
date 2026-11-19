@@ -1,10 +1,12 @@
 package proxy
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -34,6 +36,7 @@ type proxyingRegistry struct {
 	remoteURL         url.URL
 	authChallenger    authChallenger
 	basicAuth         auth.CredentialStore
+	fills             *fillRegistry
 }
 
 // NewRegistryPullThroughCache creates a registry acting as a pull through cache
@@ -61,6 +64,11 @@ func NewRegistryPullThroughCache(ctx context.Context, registry distribution.Name
 	cacheWriteTimeout := 5 * time.Minute
 	if config.CacheWriteTimeout != nil && *config.CacheWriteTimeout > 0 {
 		cacheWriteTimeout = *config.CacheWriteTimeout
+	}
+
+	spoolDir := cmp.Or(config.SpoolDirectory, os.TempDir())
+	if err := os.MkdirAll(spoolDir, 0o700); err != nil {
+		return nil, fmt.Errorf("create proxy spool directory: %w", err)
 	}
 
 	if ttl != nil {
@@ -147,6 +155,7 @@ func NewRegistryPullThroughCache(ctx context.Context, registry distribution.Name
 			cs:        cs,
 		},
 		basicAuth: b,
+		fills:     &fillRegistry{spool: &spoolBudget{dir: spoolDir, maxSize: config.SpoolMaxSize}},
 	}, nil
 }
 
@@ -206,6 +215,7 @@ func (pr *proxyingRegistry) Repository(ctx context.Context, name reference.Named
 			cacheWriteTimeout: pr.cacheWriteTimeout,
 			repositoryName:    name,
 			authChallenger:    pr.authChallenger,
+			fills:             pr.fills,
 		},
 		manifests: &proxyManifestStore{
 			repositoryName:  name,

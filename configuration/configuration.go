@@ -723,6 +723,17 @@ type Proxy struct {
 	// that cache writes don't hang indefinitely if the storage backend is slow.
 	// If not set, defaults to 5 minutes.
 	CacheWriteTimeout *time.Duration `yaml:"cachewritetimeout,omitempty"`
+
+	// SpoolDirectory holds a local copy of each blob while it is fetched from
+	// the remote registry, so concurrent requests share one fetch. If not set,
+	// defaults to the OS temporary directory.
+	SpoolDirectory string `yaml:"spooldirectory,omitempty"`
+
+	// SpoolMaxSize is the maximum number of bytes in SpoolDirectory. A blob
+	// that does not fit is still cached, but each request for it reads from
+	// the remote registry until it is cached. If not set or zero, there is no
+	// limit.
+	SpoolMaxSize int64 `yaml:"spoolmaxsize,omitempty"`
 }
 
 // ExecConfig defines the configuration for executing a command as a credential helper.

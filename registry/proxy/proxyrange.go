@@ -45,6 +45,7 @@ func (rr *remoteReader) Read(p []byte) (int, error) {
 
 	n, err := rr.body.Read(p)
 	rr.offset += int64(n)
+	proxyMetrics.BlobPull(uint64(n))
 	if err != io.EOF {
 		return n, err
 	}

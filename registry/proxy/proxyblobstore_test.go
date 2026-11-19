@@ -181,11 +181,13 @@ func makeTestEnv(t *testing.T, name string) *testEnv {
 	s := scheduler.New(ctx, inmemory.New(), "/scheduler-state.json")
 
 	proxyBlobStore := proxyBlobStore{
-		repositoryName: nameRef,
-		remoteStore:    truthBlobs,
-		localStore:     localBlobs,
-		scheduler:      s,
-		authChallenger: &mockChallenger{},
+		repositoryName:    nameRef,
+		remoteStore:       truthBlobs,
+		localStore:        localBlobs,
+		scheduler:         s,
+		authChallenger:    &mockChallenger{},
+		cacheWriteTimeout: time.Minute,
+		fills:             &fillRegistry{spool: &spoolBudget{dir: t.TempDir()}},
 	}
 
 	te := &testEnv{

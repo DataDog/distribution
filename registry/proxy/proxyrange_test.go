@@ -20,9 +20,11 @@ import (
 )
 
 type fakeUpstream struct {
-	t    *testing.T
-	blob []byte
-	desc v1.Descriptor
+	t        *testing.T
+	blob     []byte
+	desc     v1.Descriptor
+	gate     chan struct{}
+	truncate bool
 
 	mu     sync.Mutex
 	ranges []string
@@ -56,8 +58,23 @@ func (fu *fakeUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	fu.mu.Lock()
 	fu.ranges = append(fu.ranges, r.Header.Get("Range"))
+	truncate := fu.truncate
 	fu.mu.Unlock()
 
+	if r.Header.Get("Range") == "" {
+		if fu.gate != nil {
+			select {
+			case <-fu.gate:
+			case <-r.Context().Done():
+				return
+			}
+		}
+		if truncate {
+			w.Header().Set("Content-Length", strconv.FormatInt(fu.desc.Size, 10))
+			w.Write(fu.blob[:len(fu.blob)/2])
+			return
+		}
+	}
 	w.Header().Set("Content-Type", fu.desc.MediaType)
 	http.ServeContent(w, r, "", time.Time{}, bytes.NewReader(fu.blob))
 }
@@ -111,9 +128,7 @@ func TestServeRemoteSendsOneBoundedRequest(t *testing.T) {
 			if tt.rangeValue != "" {
 				r.Header.Set("Range", tt.rangeValue)
 			}
-			if err := pbs.serveRemote(t.Context(), w, r, upstream.desc.Digest, upstream.desc); err != nil {
-				t.Fatal(err)
-			}
+			pbs.serveRemote(t.Context(), w, r, upstream.desc)
 
 			if w.Code != tt.wantStatus {
 				t.Fatalf("status: got %d, want %d", w.Code, tt.wantStatus)
@@ -138,9 +153,7 @@ func TestServeRemoteMultiRange(t *testing.T) {
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
 	r.Header.Set("Range", "bytes=0-9,100-109")
-	if err := pbs.serveRemote(t.Context(), w, r, upstream.desc.Digest, upstream.desc); err != nil {
-		t.Fatal(err)
-	}
+	pbs.serveRemote(t.Context(), w, r, upstream.desc)
 
 	if w.Code != http.StatusPartialContent {
 		t.Fatalf("status: got %d, want %d", w.Code, http.StatusPartialContent)

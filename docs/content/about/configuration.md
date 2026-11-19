@@ -1300,6 +1300,8 @@ is unsupported.
 |-----------|----------|-------------------------------------------------------|
 | `remoteurl`| yes     | The URL for the repository on Docker Hub.             |
 | `ttl`      | no      | Expire proxy cache configured in "storage" after this time. Cache 168h(7 days) by default, set to 0 to disable cache expiration, The suffix is one of `ns`, `us`, `ms`, `s`, `m`, or `h`. If you specify a value but omit the suffix, the value is interpreted as a number of nanoseconds. |
+| `spooldirectory` | no | Local directory that holds each blob while it is fetched from the upstream, so that concurrent requests for the blob share one fetch. Defaults to the OS temporary directory. |
+| `spoolmaxsize` | no | Maximum number of bytes in `spooldirectory`. A blob that does not fit is still cached, but requests for it read from the upstream until it is cached. Defaults to 0, no limit. |
 
 To enable pulling private repositories (e.g. `batman/robin`), specify one of the
 following authentication methods for the pull-through cache to authenticate with
