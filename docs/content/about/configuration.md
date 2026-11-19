@@ -1300,6 +1300,7 @@ is unsupported.
 |-----------|----------|-------------------------------------------------------|
 | `remoteurl`| yes     | The URL for the repository on Docker Hub.             |
 | `ttl`      | no      | Expire proxy cache configured in "storage" after this time. Cache 168h(7 days) by default, set to 0 to disable cache expiration, The suffix is one of `ns`, `us`, `ms`, `s`, `m`, or `h`. If you specify a value but omit the suffix, the value is interpreted as a number of nanoseconds. |
+| `sharedfetch` | no | Make concurrent requests for a blob that is not cached share one fetch from the upstream. See [`sharedfetch`](#sharedfetch). |
 
 To enable pulling private repositories (e.g. `batman/robin`), specify one of the
 following authentication methods for the pull-through cache to authenticate with
@@ -1310,6 +1311,28 @@ scheme](https://distribution.github.io/distribution/spec/auth/token/).]
 
 The username and password used to authenticate with the upstream registry to
 access the private repositories.
+
+### `sharedfetch`
+
+```yaml
+proxy:
+  sharedfetch:
+    enabled: true
+    spooldirectory: /var/spool/registry
+    spoolmaxsize: 1610612736
+```
+
+When a blob is not cached, the first request starts one fetch from the
+upstream. The fetch writes the cache and a local spool file. Other requests for
+the blob read the spool while the fetch runs, so the upstream sends the blob
+once per registry instance. A ranged request that starts far past the bytes
+already fetched reads its range directly from the upstream.
+
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `enabled` | no | Turn on shared fetches. Defaults to `false`. |
+| `spooldirectory` | no | Local directory for the spool files. Defaults to the OS temporary directory. |
+| `spoolmaxsize` | no | Maximum number of bytes in `spooldirectory`. A blob that does not fit is still cached, but requests for it read from the upstream until it is cached. Defaults to 0, no limit. |
 
 ### `exec`
 

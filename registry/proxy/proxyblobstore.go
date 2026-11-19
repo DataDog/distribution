@@ -26,6 +26,7 @@ type proxyBlobStore struct {
 	cacheWriteTimeout time.Duration
 	repositoryName    reference.Named
 	authChallenger    authChallenger
+	fills             *fillRegistry // set when concurrent requests share one fetch per blob
 }
 
 var _ distribution.BlobStore = &proxyBlobStore{}
@@ -130,6 +131,10 @@ func (pbs *proxyBlobStore) ServeBlob(ctx context.Context, w http.ResponseWriter,
 		setResponseHeaders(w.Header(), desc.Size, desc.MediaType, desc.Digest)
 		w.WriteHeader(http.StatusOK)
 		return nil
+	}
+
+	if pbs.fills != nil {
+		return pbs.serveSharedFetch(ctx, w, r, dgst)
 	}
 
 	mu.Lock()
