@@ -18,7 +18,9 @@ var (
 	// pulledBytes is the size of total bytes pulled from the upstream for blob/manifest
 	pulledBytes = prometheus.ProxyNamespace.NewLabeledCounter("pulled_bytes", "The size of total bytes pulled from the upstream", "type")
 	// pushedBytes is the size of total bytes pushed to the client for blob/manifest
-	pushedBytes = prometheus.ProxyNamespace.NewLabeledCounter("pushed_bytes", "The size of total bytes pushed to the client", "type")
+	pushedBytes    = prometheus.ProxyNamespace.NewLabeledCounter("pushed_bytes", "The size of total bytes pushed to the client", "type")
+	spoolBytes     = prometheus.ProxyNamespace.NewGauge("spool", "The size of blobs held in the spool directory", metrics.Bytes)
+	spoolFallbacks = prometheus.ProxyNamespace.NewLabeledCounter("spool_fallbacks", "The number of blob fetches without a spool, which read the upstream once per request", "reason")
 )
 
 // Metrics is used to hold metric counters
@@ -64,6 +66,8 @@ func init() {
 	metrics.Register(prometheus.ProxyNamespace)
 	initPrometheusMetrics("blob")
 	initPrometheusMetrics("manifest")
+	spoolFallbacks.WithValues("budget").Inc(0)
+	spoolFallbacks.WithValues("error").Inc(0)
 }
 
 func initPrometheusMetrics(value string) {

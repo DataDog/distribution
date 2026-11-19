@@ -12,6 +12,10 @@ import (
 	"testing"
 	"time"
 
+	prom "github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
+
+	"github.com/distribution/distribution/v3/metrics"
 	"github.com/distribution/distribution/v3/registry/storage"
 	"github.com/distribution/distribution/v3/registry/storage/cache/memory"
 	"github.com/distribution/distribution/v3/registry/storage/driver/filesystem"
@@ -111,6 +115,42 @@ func (env *fillTestEnv) assertSpoolReleased(t *testing.T) {
 	}
 }
 
+func metricValue(t *testing.T, name string, labels map[string]string) float64 {
+	t.Helper()
+	registry := prom.NewRegistry()
+	registry.MustRegister(metrics.ProxyNamespace)
+	families, err := registry.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, family := range families {
+		if family.GetName() != name {
+			continue
+		}
+		for _, metric := range family.GetMetric() {
+			if !hasLabels(metric, labels) {
+				continue
+			}
+			if gauge := metric.GetGauge(); gauge != nil {
+				return gauge.GetValue()
+			}
+			return metric.GetCounter().GetValue()
+		}
+	}
+	t.Fatalf("metric %s%v not found", name, labels)
+	return 0
+}
+
+func hasLabels(metric *dto.Metric, labels map[string]string) bool {
+	matched := 0
+	for _, pair := range metric.GetLabel() {
+		if value, ok := labels[pair.GetName()]; ok && value == pair.GetValue() {
+			matched++
+		}
+	}
+	return matched == len(labels)
+}
+
 func eventually(t *testing.T, condition func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
@@ -142,6 +182,9 @@ func TestFillConcurrentRequestsShareOneFetch(t *testing.T) {
 	}
 	// The leader and the fetch goroutine hold two references, each other request holds one.
 	eventually(t, func() bool { return env.refs() == len(ranges)+1 })
+	if got := metricValue(t, "registry_proxy_spool_bytes", nil); got != float64(env.upstream.desc.Size) {
+		t.Errorf("spool bytes during the fill: got %v, want %d", got, env.upstream.desc.Size)
+	}
 	close(env.upstream.gate)
 	wg.Wait()
 
@@ -161,6 +204,9 @@ func TestFillConcurrentRequestsShareOneFetch(t *testing.T) {
 	}
 	env.assertCached(t)
 	env.assertSpoolReleased(t)
+	if got := metricValue(t, "registry_proxy_spool_bytes", nil); got != 0 {
+		t.Errorf("spool bytes after the fill: got %v, want 0", got)
+	}
 }
 
 func TestFillFarRangeReadsRemote(t *testing.T) {
@@ -221,6 +267,7 @@ func TestFillSurvivesLeaderDisconnect(t *testing.T) {
 func TestFillWithoutSpoolBudget(t *testing.T) {
 	env := newFillTestEnv(t, 1<<20, 1)
 	close(env.upstream.gate)
+	fallbacks := metricValue(t, "registry_proxy_spool_fallbacks_total", map[string]string{"reason": "budget"})
 
 	w, err := env.serve(t.Context(), "bytes=0-1023")
 	if err != nil {
@@ -236,6 +283,9 @@ func TestFillWithoutSpoolBudget(t *testing.T) {
 		t.Errorf("upstream GET ranges: got %q, want one fill and one ranged GET", got)
 	}
 	env.assertSpoolReleased(t)
+	if got := metricValue(t, "registry_proxy_spool_fallbacks_total", map[string]string{"reason": "budget"}); got != fallbacks+1 {
+		t.Errorf("budget fallbacks: got %v, want %v", got, fallbacks+1)
+	}
 }
 
 func TestFillFailure(t *testing.T) {

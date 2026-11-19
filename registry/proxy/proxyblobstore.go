@@ -122,7 +122,7 @@ func (pbs *proxyBlobStore) joinFill(ctx context.Context, dgst digest.Digest) (f 
 	if err != nil {
 		return nil, false, err
 	}
-	f, leader = pbs.fills.start(key, desc)
+	f, leader = pbs.fills.start(ctx, key, desc)
 	if leader {
 		fillCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), pbs.cacheWriteTimeout)
 		go func() {

@@ -40,30 +40,31 @@ type spoolBudget struct {
 	used    atomic.Int64
 }
 
-func (sb *spoolBudget) create(size int64) *os.File {
-	if sb == nil {
-		return nil
-	}
-	if used := sb.used.Add(size); sb.maxSize > 0 && used > sb.maxSize {
-		sb.used.Add(-size)
-		return nil
+var errSpoolFull = errors.New("spool budget exceeded")
+
+func (sb *spoolBudget) create(size int64) (*os.File, error) {
+	if used := sb.add(size); sb.maxSize > 0 && used > sb.maxSize {
+		sb.add(-size)
+		return nil, errSpoolFull
 	}
 	file, err := os.CreateTemp(sb.dir, "blob-")
 	if err != nil {
-		sb.used.Add(-size)
-		return nil
+		sb.add(-size)
+		return nil, err
 	}
 	// Unlink now so the kernel frees the space when the last reader closes the file, even after a crash.
 	if err := os.Remove(file.Name()); err != nil {
 		file.Close()
-		sb.used.Add(-size)
-		return nil
+		sb.add(-size)
+		return nil, err
 	}
-	return file
+	return file, nil
 }
 
-func (sb *spoolBudget) release(size int64) {
-	sb.used.Add(-size)
+func (sb *spoolBudget) add(size int64) int64 {
+	used := sb.used.Add(size)
+	spoolBytes.Set(float64(used))
+	return used
 }
 
 type blobFill struct {
@@ -91,8 +92,8 @@ func (fr *fillRegistry) lookup(key fillKey) *blobFill {
 	return f
 }
 
-func (fr *fillRegistry) start(key fillKey, desc v1.Descriptor) (f *blobFill, started bool) {
-	spool := fr.spool.create(desc.Size)
+func (fr *fillRegistry) start(ctx context.Context, key fillKey, desc v1.Descriptor) (f *blobFill, started bool) {
+	spool := fr.createSpool(ctx, desc.Size)
 
 	fr.mu.Lock()
 	if existing := fr.fills[key]; existing != nil {
@@ -116,6 +117,21 @@ func (fr *fillRegistry) start(key fillKey, desc v1.Descriptor) (f *blobFill, sta
 	return f, true
 }
 
+func (fr *fillRegistry) createSpool(ctx context.Context, size int64) *os.File {
+	if fr.spool == nil {
+		return nil
+	}
+	spool, err := fr.spool.create(size)
+	switch {
+	case errors.Is(err, errSpoolFull):
+		spoolFallbacks.WithValues("budget").Inc(1)
+	case err != nil:
+		spoolFallbacks.WithValues("error").Inc(1)
+		dcontext.GetLogger(ctx).WithError(err).Errorf("Error creating blob spool")
+	}
+	return spool
+}
+
 func (fr *fillRegistry) remove(key fillKey) {
 	fr.mu.Lock()
 	defer fr.mu.Unlock()
@@ -137,7 +153,7 @@ func (fr *fillRegistry) closeSpool(spool *os.File, size int64) {
 		return
 	}
 	spool.Close()
-	fr.spool.release(size)
+	fr.spool.add(-size)
 }
 
 func (fr *fillRegistry) run(ctx context.Context, pbs *proxyBlobStore, key fillKey, f *blobFill) {
