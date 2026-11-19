@@ -9,9 +9,13 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	gometrics "github.com/docker/go-metrics"
 
 	"github.com/distribution/distribution/v3/configuration"
 	"github.com/distribution/distribution/v3/registry/storage"
@@ -117,6 +121,25 @@ func (env *fillTestEnv) assertSpoolReleased(t *testing.T) {
 	}
 }
 
+func metricValue(t *testing.T, series string) float64 {
+	t.Helper()
+	w := httptest.NewRecorder()
+	gometrics.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	for line := range strings.Lines(w.Body.String()) {
+		value, found := strings.CutPrefix(strings.TrimSpace(line), series+" ")
+		if !found {
+			continue
+		}
+		v, err := strconv.ParseFloat(value, 64)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return v
+	}
+	t.Fatalf("metric %s not found", series)
+	return 0
+}
+
 func eventually(t *testing.T, condition func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
@@ -167,6 +190,9 @@ func TestFillConcurrentRequestsShareOneFetch(t *testing.T) {
 	}
 	// The leader and the fetch goroutine hold two references, each other request holds one.
 	eventually(t, func() bool { return env.refs() == len(ranges)+1 })
+	if got := metricValue(t, "registry_proxy_spool_bytes"); got != float64(env.upstream.desc.Size) {
+		t.Errorf("spool bytes during the fill: got %v, want %d", got, env.upstream.desc.Size)
+	}
 	close(env.upstream.gate)
 	wg.Wait()
 
@@ -186,6 +212,9 @@ func TestFillConcurrentRequestsShareOneFetch(t *testing.T) {
 	}
 	env.assertCached(t)
 	env.assertSpoolReleased(t)
+	if got := metricValue(t, "registry_proxy_spool_bytes"); got != 0 {
+		t.Errorf("spool bytes after the fill: got %v, want 0", got)
+	}
 }
 
 func TestFillFarRangeReadsRemote(t *testing.T) {
@@ -246,6 +275,7 @@ func TestFillSurvivesLeaderDisconnect(t *testing.T) {
 func TestFillWithoutSpoolBudget(t *testing.T) {
 	env := newFillTestEnv(t, 1<<20, 1)
 	close(env.upstream.gate)
+	fallbacks := metricValue(t, `registry_proxy_spool_fallbacks_total{reason="budget"}`)
 
 	w, err := env.serve(t.Context(), "bytes=0-1023")
 	if err != nil {
@@ -261,6 +291,9 @@ func TestFillWithoutSpoolBudget(t *testing.T) {
 		t.Errorf("upstream GET ranges: got %q, want one fill and one ranged GET", got)
 	}
 	env.assertSpoolReleased(t)
+	if got := metricValue(t, `registry_proxy_spool_fallbacks_total{reason="budget"}`); got != fallbacks+1 {
+		t.Errorf("budget fallbacks: got %v, want %v", got, fallbacks+1)
+	}
 }
 
 func TestFillFailure(t *testing.T) {

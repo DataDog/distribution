@@ -62,7 +62,9 @@ func (sb *spoolBudget) create(size int64) (*os.File, error) {
 }
 
 func (sb *spoolBudget) add(size int64) int64 {
-	return sb.used.Add(size)
+	used := sb.used.Add(size)
+	spoolBytes.Set(float64(used))
+	return used
 }
 
 type blobFill struct {
@@ -120,7 +122,11 @@ func (fr *fillRegistry) createSpool(ctx context.Context, size int64) *os.File {
 		return nil
 	}
 	spool, err := fr.spool.create(size)
-	if err != nil && !errors.Is(err, errSpoolFull) {
+	switch {
+	case errors.Is(err, errSpoolFull):
+		spoolFallbacks.WithValues("budget").Inc(1)
+	case err != nil:
+		spoolFallbacks.WithValues("error").Inc(1)
 		dcontext.GetLogger(ctx).WithError(err).Errorf("Error creating blob spool")
 	}
 	return spool
