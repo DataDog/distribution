@@ -38,7 +38,7 @@ func (pbs *proxyBlobStore) serveSharedFetch(ctx context.Context, w http.Response
 	}
 	defer pbs.fills.release(f)
 
-	pbs.serveFill(ctx, w, r, f)
+	pbs.serveFill(ctx, w, r, f, leader)
 	if !leader {
 		return nil
 	}
@@ -71,12 +71,18 @@ func (pbs *proxyBlobStore) joinFill(ctx context.Context, dgst digest.Digest) (f 
 	return f, leader, nil
 }
 
-func (pbs *proxyBlobStore) serveFill(ctx context.Context, w http.ResponseWriter, r *http.Request, f *blobFill) {
+func (pbs *proxyBlobStore) serveFill(ctx context.Context, w http.ResponseWriter, r *http.Request, f *blobFill, leader bool) {
+	role := roleFollower
+	if leader {
+		role = roleLeader
+	}
 	start, _, _ := singleRange(r, f.desc.Size)
 	if !f.canServe(start, pbs.fills.lookahead) {
+		defer trackInflight(modeSharedFetch, role, sourceUpstream)()
 		pbs.serveRemoteRange(ctx, w, r, f.desc)
 		return
 	}
+	defer trackInflight(modeSharedFetch, role, sourceSpool)()
 	serveContent(w, r, f.desc, &spoolReader{ctx: ctx, f: f})
 }
 

@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -140,6 +141,11 @@ func metricValue(t *testing.T, series string) float64 {
 	return 0
 }
 
+func inflightValue(t *testing.T, mode, role, source string) float64 {
+	t.Helper()
+	return metricValue(t, fmt.Sprintf(`registry_proxy_blob_inflight_requests{mode=%q,role=%q,source=%q}`, mode, role, source))
+}
+
 func eventually(t *testing.T, condition func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
@@ -196,8 +202,17 @@ func TestFillConcurrentRequestsShareOneFetch(t *testing.T) {
 	if got := metricValue(t, "registry_proxy_spool_bytes"); got != float64(env.upstream.desc.Size) {
 		t.Errorf("spool bytes during the fill: got %v, want %d", got, env.upstream.desc.Size)
 	}
+	eventually(t, func() bool {
+		return inflightValue(t, modeSharedFetch, roleLeader, sourceSpool) == 1 &&
+			inflightValue(t, modeSharedFetch, roleFollower, sourceSpool) == float64(len(ranges)-1)
+	})
 	close(env.upstream.gate)
 	wg.Wait()
+	for _, role := range []string{roleLeader, roleFollower} {
+		if got := inflightValue(t, modeSharedFetch, role, sourceSpool); got != 0 {
+			t.Errorf("inflight %s requests after the fill: got %v, want 0", role, got)
+		}
+	}
 
 	if got := env.upstream.gets(); !slices.Equal(got, []string{""}) {
 		t.Errorf("upstream GET ranges: got %q, want one unranged GET", got)
@@ -217,6 +232,39 @@ func TestFillConcurrentRequestsShareOneFetch(t *testing.T) {
 	env.assertSpoolReleased(t)
 	if got := metricValue(t, "registry_proxy_spool_bytes"); got != 0 {
 		t.Errorf("spool bytes after the fill: got %v, want 0", got)
+	}
+}
+
+func TestInflightDefaultMode(t *testing.T) {
+	env := newFillTestEnv(t, 1<<20, 0)
+	env.store.fills = nil
+
+	const followers = 3
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		if _, err := env.serve(t.Context(), ""); err != nil {
+			t.Error(err)
+		}
+	})
+	eventually(t, func() bool { return inflightValue(t, modeDefault, roleLeader, sourceUpstream) == 1 })
+	for range followers {
+		wg.Go(func() {
+			if _, err := env.serve(t.Context(), ""); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+	eventually(t, func() bool { return inflightValue(t, modeDefault, roleFollower, sourceUpstream) == followers })
+	close(env.upstream.gate)
+	wg.Wait()
+
+	for _, role := range []string{roleLeader, roleFollower} {
+		if got := inflightValue(t, modeDefault, role, sourceUpstream); got != 0 {
+			t.Errorf("inflight %s requests after the pulls: got %v, want 0", role, got)
+		}
+	}
+	if got := len(env.upstream.gets()); got != 1+followers {
+		t.Errorf("upstream GETs: got %d, want %d", got, 1+followers)
 	}
 }
 

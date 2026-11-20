@@ -144,6 +144,7 @@ func (pbs *proxyBlobStore) ServeBlob(ctx context.Context, w http.ResponseWriter,
 		// Will return the blob from the remote store directly.
 		// TODO Maybe we could reuse the these blobs are serving remotely and caching locally.
 		mu.Unlock()
+		defer trackInflight(modeDefault, roleFollower, sourceUpstream)()
 		if rangeRequested(r) {
 			// Another request owns the cache write; just serve the
 			// requested range to this client from the remote store.
@@ -158,6 +159,7 @@ func (pbs *proxyBlobStore) ServeBlob(ctx context.Context, w http.ResponseWriter,
 	}
 	inflight[dgst] = struct{}{}
 	mu.Unlock()
+	defer trackInflight(modeDefault, roleLeader, sourceUpstream)()
 
 	defer func() {
 		mu.Lock()
