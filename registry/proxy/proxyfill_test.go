@@ -143,7 +143,7 @@ func metricValue(t *testing.T, series string) float64 {
 
 func inflightValue(t *testing.T, mode, role, source string) float64 {
 	t.Helper()
-	return metricValue(t, fmt.Sprintf(`registry_proxy_blob_inflight_requests{mode=%q,role=%q,source=%q}`, mode, role, source))
+	return metricValue(t, fmt.Sprintf(`registry_proxy_blob_inflight_requests{fetch_role=%q,fetch_source=%q,mode=%q}`, role, source, mode))
 }
 
 func eventually(t *testing.T, condition func() bool) {
