@@ -761,6 +761,12 @@ type SharedFetch struct {
 	// the remote registry until it is cached. If not set or zero, there is no
 	// limit.
 	SpoolMaxSize int64 `yaml:"spoolmaxsize,omitempty"`
+
+	// SpoolLookahead is how many bytes past the spool a ranged request may
+	// start and still wait for the spool. A request that starts further reads
+	// its range from the remote registry. If not set or zero, defaults to
+	// 20MiB: about 1s at 20MiB/s.
+	SpoolLookahead int64 `yaml:"spoollookahead,omitempty"`
 }
 
 // Validation configures validation options for the registry.

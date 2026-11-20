@@ -1320,19 +1320,22 @@ proxy:
     enabled: true
     spooldirectory: /var/spool/registry
     spoolmaxsize: 1610612736
+    spoollookahead: 20971520
 ```
 
 When a blob is not cached, the first request starts one fetch from the
 upstream. The fetch writes the cache and a local spool file. Other requests for
 the blob read the spool while the fetch runs, so the upstream sends the blob
-once per registry instance. A ranged request that starts far past the bytes
-already fetched reads its range directly from the upstream.
+once per registry instance. A ranged request that starts more than
+`spoollookahead` bytes past the bytes already fetched reads its range directly
+from the upstream.
 
 | Parameter | Required | Description |
 |-----------|----------|-------------|
 | `enabled` | no | Turn on shared fetches. Defaults to `false`. |
 | `spooldirectory` | no | Local directory for the spool files. Defaults to the OS temporary directory. |
 | `spoolmaxsize` | no | Maximum number of bytes in `spooldirectory`. A blob that does not fit is still cached, but requests for it read from the upstream until it is cached. Defaults to 0, no limit. |
+| `spoollookahead` | no | How many bytes past the spool a ranged request may start and still wait for the spool. Defaults to 20MiB (20971520): about 1s at 20MiB/s. |
 
 ### `exec`
 

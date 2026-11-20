@@ -16,8 +16,7 @@ import (
 	"github.com/distribution/reference"
 )
 
-// A request whose range starts more than this past the fill offset reads from the remote instead of waiting.
-const spoolLookahead = 8 << 20
+const defaultSpoolLookahead = 20 << 20
 
 var errShortFill = errors.New("remote blob ended before its size")
 
@@ -28,7 +27,8 @@ type fillKey struct {
 }
 
 type fillRegistry struct {
-	spool *spoolBudget
+	spool     *spoolBudget
+	lookahead int64
 
 	mu    sync.Mutex
 	fills map[fillKey]*blobFill
@@ -223,10 +223,10 @@ func (f *blobFill) finish(err error) {
 	close(f.progress)
 }
 
-func (f *blobFill) canServe(start int64) bool {
+func (f *blobFill) canServe(start, lookahead int64) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.spool != nil && f.err == nil && start <= f.written+spoolLookahead
+	return f.spool != nil && f.err == nil && start <= f.written+lookahead
 }
 
 func (f *blobFill) waitFor(ctx context.Context, end int64) (int64, error) {

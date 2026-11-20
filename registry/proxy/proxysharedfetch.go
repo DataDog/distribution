@@ -25,7 +25,10 @@ func newFillRegistry(config configuration.SharedFetch) (*fillRegistry, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("create proxy spool directory: %w", err)
 	}
-	return &fillRegistry{spool: &spoolBudget{dir: dir, maxSize: config.SpoolMaxSize}}, nil
+	return &fillRegistry{
+		spool:     &spoolBudget{dir: dir, maxSize: config.SpoolMaxSize},
+		lookahead: cmp.Or(config.SpoolLookahead, defaultSpoolLookahead),
+	}, nil
 }
 
 func (pbs *proxyBlobStore) serveSharedFetch(ctx context.Context, w http.ResponseWriter, r *http.Request, dgst digest.Digest) error {
@@ -70,7 +73,7 @@ func (pbs *proxyBlobStore) joinFill(ctx context.Context, dgst digest.Digest) (f 
 
 func (pbs *proxyBlobStore) serveFill(ctx context.Context, w http.ResponseWriter, r *http.Request, f *blobFill) {
 	start, _, _ := singleRange(r, f.desc.Size)
-	if !f.canServe(start) {
+	if !f.canServe(start, pbs.fills.lookahead) {
 		pbs.serveRemoteRange(ctx, w, r, f.desc)
 		return
 	}

@@ -165,6 +165,9 @@ func TestNewFillRegistry(t *testing.T) {
 	if fills == nil {
 		t.Fatal("enabled: got nil registry")
 	}
+	if fills.lookahead != defaultSpoolLookahead {
+		t.Errorf("default lookahead: got %d, want %d", fills.lookahead, defaultSpoolLookahead)
+	}
 	if _, err := os.Stat(dir); err != nil {
 		t.Errorf("spool directory not created: %v", err)
 	}
@@ -218,7 +221,8 @@ func TestFillConcurrentRequestsShareOneFetch(t *testing.T) {
 }
 
 func TestFillFarRangeReadsRemote(t *testing.T) {
-	env := newFillTestEnv(t, 3*spoolLookahead, 0)
+	env := newFillTestEnv(t, 4<<20, 0)
+	env.store.fills.lookahead = 1 << 20
 
 	leaderDone := make(chan error, 1)
 	go func() {
@@ -227,8 +231,8 @@ func TestFillFarRangeReadsRemote(t *testing.T) {
 	}()
 	eventually(t, func() bool { return env.refs() == 2 })
 
-	start := 2 * spoolLookahead
-	w, err := env.serve(t.Context(), "bytes=16777216-16778239")
+	start := 2 << 20
+	w, err := env.serve(t.Context(), "bytes=2097152-2098175")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -242,7 +246,7 @@ func TestFillFarRangeReadsRemote(t *testing.T) {
 	}
 	got := env.upstream.gets()
 	slices.Sort(got)
-	if want := []string{"", "bytes=16777216-16778239"}; !slices.Equal(got, want) {
+	if want := []string{"", "bytes=2097152-2098175"}; !slices.Equal(got, want) {
 		t.Errorf("upstream GET ranges: got %q, want %q", got, want)
 	}
 	env.assertCached(t)
