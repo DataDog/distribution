@@ -83,6 +83,9 @@ func (pbs *proxyBlobStore) serveFill(ctx context.Context, w http.ResponseWriter,
 		return
 	}
 	defer trackInflight(modeSharedFetch, role, sourceSpool)()
+	if !leader {
+		spoolHits.Inc()
+	}
 	serveContent(w, r, f.desc, &spoolReader{ctx: ctx, f: f})
 }
 

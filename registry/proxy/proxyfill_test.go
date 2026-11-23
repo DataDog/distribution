@@ -182,6 +182,7 @@ func TestNewFillRegistry(t *testing.T) {
 func TestFillConcurrentRequestsShareOneFetch(t *testing.T) {
 	env := newFillTestEnv(t, 1<<20, 0)
 	ranges := []string{"", "", "", "bytes=0-1023", "bytes=4096-8191", "bytes=-1024"}
+	spoolHitsBefore := metricValue(t, "registry_proxy_spool_hits_total")
 
 	var wg sync.WaitGroup
 	responses := make([]*httptest.ResponseRecorder, len(ranges))
@@ -212,6 +213,9 @@ func TestFillConcurrentRequestsShareOneFetch(t *testing.T) {
 		if got := inflightValue(t, modeSharedFetch, role, sourceSpool); got != 0 {
 			t.Errorf("inflight %s requests after the fill: got %v, want 0", role, got)
 		}
+	}
+	if got, want := metricValue(t, "registry_proxy_spool_hits_total")-spoolHitsBefore, float64(len(ranges)-1); got != want {
+		t.Errorf("spool hits: got %v, want %v", got, want)
 	}
 
 	if got := env.upstream.gets(); !slices.Equal(got, []string{""}) {
@@ -271,6 +275,7 @@ func TestInflightDefaultMode(t *testing.T) {
 func TestFillFarRangeReadsRemote(t *testing.T) {
 	env := newFillTestEnv(t, 4<<20, 0)
 	env.store.fills.lookahead = 1 << 20
+	spoolHitsBefore := metricValue(t, "registry_proxy_spool_hits_total")
 
 	leaderDone := make(chan error, 1)
 	go func() {
@@ -298,6 +303,9 @@ func TestFillFarRangeReadsRemote(t *testing.T) {
 		t.Errorf("upstream GET ranges: got %q, want %q", got, want)
 	}
 	env.assertCached(t)
+	if got := metricValue(t, "registry_proxy_spool_hits_total") - spoolHitsBefore; got != 0 {
+		t.Errorf("spool hits: got %v, want 0", got)
+	}
 }
 
 func TestFillSurvivesLeaderDisconnect(t *testing.T) {
