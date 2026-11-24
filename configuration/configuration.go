@@ -723,6 +723,9 @@ type Proxy struct {
 	// that cache writes don't hang indefinitely if the storage backend is slow.
 	// If not set, defaults to 5 minutes.
 	CacheWriteTimeout *time.Duration `yaml:"cachewritetimeout,omitempty"`
+
+	// SharedFetch configures how concurrent requests share one fetch of a blob.
+	SharedFetch SharedFetch `yaml:"sharedfetch,omitempty"`
 }
 
 // ExecConfig defines the configuration for executing a command as a credential helper.
@@ -740,6 +743,30 @@ type ExecConfig struct {
 	// If set to zero, the command will be executed for every request.
 	// If not set, the command will only be executed once.
 	Lifetime *time.Duration `yaml:"lifetime,omitempty"`
+}
+
+// SharedFetch makes concurrent requests for a blob that is not cached share
+// one fetch from the remote registry. The fetch writes a local spool that the
+// requests read before the cache commit.
+type SharedFetch struct {
+	// Enabled turns on shared fetches. If false, the other options are ignored.
+	Enabled bool `yaml:"enabled,omitempty"`
+
+	// SpoolDirectory holds the spools. If not set, defaults to the OS
+	// temporary directory.
+	SpoolDirectory string `yaml:"spooldirectory,omitempty"`
+
+	// SpoolMaxSize is the maximum number of bytes in SpoolDirectory. A blob
+	// that does not fit is still cached, but each request for it reads from
+	// the remote registry until it is cached. If not set or zero, there is no
+	// limit.
+	SpoolMaxSize int64 `yaml:"spoolmaxsize,omitempty"`
+
+	// SpoolLookahead is how many bytes past the spool a ranged request may
+	// start and still wait for the spool. A request that starts further reads
+	// its range from the remote registry. If not set or zero, defaults to
+	// 20MiB: about 1s at 20MiB/s.
+	SpoolLookahead int64 `yaml:"spoollookahead,omitempty"`
 }
 
 // Validation configures validation options for the registry.

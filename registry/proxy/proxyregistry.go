@@ -34,6 +34,7 @@ type proxyingRegistry struct {
 	remoteURL         url.URL
 	authChallenger    authChallenger
 	basicAuth         auth.CredentialStore
+	fills             *fillRegistry
 }
 
 // NewRegistryPullThroughCache creates a registry acting as a pull through cache
@@ -61,6 +62,11 @@ func NewRegistryPullThroughCache(ctx context.Context, registry distribution.Name
 	cacheWriteTimeout := 5 * time.Minute
 	if config.CacheWriteTimeout != nil && *config.CacheWriteTimeout > 0 {
 		cacheWriteTimeout = *config.CacheWriteTimeout
+	}
+
+	fills, err := newFillRegistry(config.SharedFetch)
+	if err != nil {
+		return nil, err
 	}
 
 	if ttl != nil {
@@ -147,6 +153,7 @@ func NewRegistryPullThroughCache(ctx context.Context, registry distribution.Name
 			cs:        cs,
 		},
 		basicAuth: b,
+		fills:     fills,
 	}, nil
 }
 
@@ -206,6 +213,7 @@ func (pr *proxyingRegistry) Repository(ctx context.Context, name reference.Named
 			cacheWriteTimeout: pr.cacheWriteTimeout,
 			repositoryName:    name,
 			authChallenger:    pr.authChallenger,
+			fills:             pr.fills,
 		},
 		manifests: &proxyManifestStore{
 			repositoryName:  name,
